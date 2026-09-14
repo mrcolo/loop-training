@@ -12,3 +12,9 @@ traindemo/
 share/
 energy_index.npz
 *.npz
+*.npy
+latents.npy
+encode.log
+chain.log
+supervisor.log
+bench*.log

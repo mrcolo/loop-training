@@ -27,7 +27,7 @@ from safetensors.torch import load_file, save_file
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-from dataset import Excerpts, collate
+from dataset import Excerpts, LatentExcerpts, collate
 from stable_audio_3.inference.sampling import (
     build_schedule,
     sample_flow_pingpong,
@@ -47,15 +47,23 @@ def load(model_dir: Path, device):
     return cfg, load_diffusion_cond(cfg, str(model_dir / "model.safetensors"), device=device)
 
 
-def outpaint_mask(latents: torch.Tensor, p_full: float):
-    """Keep a random-length prefix, generate the rest. 1 = given, 0 = to generate.
+def outpaint_mask(latents: torch.Tensor, p_full: float, p_spans: float, p_segments: float):
+    """1 = given as context, 0 = to be generated.
 
-    `p_full` of the batch is fully masked instead, which keeps the model's
-    unconditional generation from drifting while it learns to continue audio.
+    Mostly a random-length prefix, which is outpainting. The remainder augments
+    the shape of the context: interior spans at a controlled mask ratio so the
+    model never assumes context is a clean prefix, scattered segments, and fully
+    masked items so unconditional generation does not drift. Prefix length,
+    span count and mask ratio are all resampled every step.
     """
     keep = torch.ones(latents.shape[0], latents.shape[-1], dtype=torch.bool, device=latents.device)
-    return random_inpaint_mask(  # probabilities are [segments, full, causal]
-        latents, padding_masks=keep, mask_type_probabilities=[0.0, p_full, 1.0 - p_full])
+    p_causal = 1.0 - p_full - p_spans - p_segments
+    if p_causal <= 0:
+        raise ValueError("mask probabilities leave nothing for the causal case")
+    return random_inpaint_mask(  # [segments, full, causal, spans]
+        latents, padding_masks=keep,
+        mask_type_probabilities=[p_segments, p_full, p_causal, p_spans],
+        mask_ratio_range=(0.2, 1.0))
 
 
 def masked_mean(err: torch.Tensor, region: torch.Tensor) -> torch.Tensor:
@@ -70,15 +78,14 @@ def masked_mean(err: torch.Tensor, region: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
-def frozen_val(model, data, dev, n_excerpts: int = 4, n_t: int = 4):
+def frozen_val(encode, data, dev, n_excerpts: int = 4, n_t: int = 4):
     """Freeze a validation slice: the same excerpts, masks, timesteps and noise
     every time. Training loss is a single batch at a random timestep and swings
     far too much to read; this is the number that actually shows learning."""
     torch.manual_seed(0)
     items = []
     for i in range(n_excerpts):
-        with torch.autocast("cuda", torch.bfloat16):
-            z = model.pretransform.encode(data.at(600 + i * 7200)[0][None].to(dev)).float()
+        z = encode(data.at(600 + i * 7200)[0][None])
         mask = torch.ones_like(z[:, :1])
         mask[..., int(z.shape[-1] * (0.25 + 0.5 * i / max(n_excerpts - 1, 1))):] = 0
         for j in range(n_t):
@@ -138,8 +145,11 @@ def main():
     p.add_argument("--lr", type=float, default=2e-6, help="weight matrices")
     p.add_argument("--lr-1d", type=float, default=1e-6, help="norm gains and adaLN gates")
     p.add_argument("--warmup", type=int, default=100)
-    p.add_argument("--p-full", type=float, default=0.1, help="fraction of fully masked items")
+    p.add_argument("--p-full", type=float, default=0.10, help="fully masked, keeps unconditional behaviour")
+    p.add_argument("--p-spans", type=float, default=0.15, help="interior spans masked, augments context shape")
+    p.add_argument("--p-segments", type=float, default=0.05, help="scattered segments masked")
     p.add_argument("--workers", type=int, default=2)
+    p.add_argument("--latents", type=Path, help="precomputed stream from encode_latents.py")
     p.add_argument("--index", default="energy_index.npz", help="energy index from scan_energy.py")
     p.add_argument("--min-rms", type=float, default=0.15, help="skip excerpts quieter than this")
     p.add_argument("--min-sub", type=float, default=0.0, help="skip excerpts with less sub-bass than this")
@@ -183,15 +193,25 @@ def main():
          {"params": vecs, "lr": a.lr_1d, "base_lr": a.lr_1d, "weight_decay": 0.0}],
         betas=(0.9, 0.95))
 
-    data = Excerpts([a.audio], a.seconds, sr, a.prompt, epoch=a.batch * 100,
-                    index=a.index, min_rms=a.min_rms, min_sub=a.min_sub)
+    ratio = int(model.pretransform.downsampling_ratio)
+    if a.latents:
+        data = LatentExcerpts(a.latents, a.seconds, sr, ratio, a.prompt, epoch=a.batch * 100,
+                              index=a.index, min_rms=a.min_rms, min_sub=a.min_sub)
+        encode = lambda batch: batch.to(dev, non_blocking=True).float()
+    else:
+        data = Excerpts([a.audio], a.seconds, sr, a.prompt, epoch=a.batch * 100,
+                        index=a.index, min_rms=a.min_rms, min_sub=a.min_sub)
+
+        def encode(batch):
+            with torch.autocast("cuda", torch.bfloat16):
+                return model.pretransform.encode(batch.to(dev, non_blocking=True)).float()
     loader = DataLoader(data, batch_size=a.batch, collate_fn=collate, drop_last=True,
                         num_workers=a.workers, persistent_workers=a.workers > 0)
 
-    # One fixed excerpt, encoded once, so the demos are comparable step to step.
-    with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
-        ref = model.pretransform.encode(data.at(a.demo_at)[0][None].to(dev)).float()
-    val_items = frozen_val(model, data, dev)
+    # One fixed excerpt, so the demos are comparable step to step.
+    with torch.no_grad():
+        ref = encode(data.at(a.demo_at)[0][None])
+    val_items = frozen_val(encode, data, dev)
 
     tb = SummaryWriter(a.out / "tb")
     tb.add_text("config", "\n".join(f"{k} = {v}" for k, v in vars(a).items()), 0)
@@ -204,9 +224,9 @@ def main():
             for g in opt.param_groups:
                 g["lr"] = g["base_lr"] * min(1.0, step / max(a.warmup, 1))
 
-            with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
-                z = model.pretransform.encode(audio.to(dev, non_blocking=True)).float()
-            masked, mask = outpaint_mask(z, a.p_full)
+            with torch.no_grad():
+                z = encode(audio)
+            masked, mask = outpaint_mask(z, a.p_full, a.p_spans, a.p_segments)
             cond["inpaint_mask"], cond["inpaint_masked_input"] = [mask], [masked]
 
             # Rectified flow: x_t = (1-t)*z + t*noise, and the model predicts noise - z.

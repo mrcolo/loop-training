@@ -17,6 +17,65 @@ import torch.nn.functional as F
 import torchaudio
 
 
+def gated_starts(index, seconds: float, min_rms: float, min_sub: float):
+    """Window start offsets, in seconds, that clear the energy thresholds."""
+    d = np.load(index)
+    hop = float(d["hop"])
+    box = np.ones(max(1, round(seconds / hop)))
+    box /= box.size
+    keep = ((np.convolve(d["rms"], box, "valid") >= min_rms)
+            & (np.convolve(d["sub"], box, "valid") >= min_sub))
+    starts = np.flatnonzero(keep) * hop
+    if not len(starts):
+        raise ValueError("energy gate rejected the entire source; lower the thresholds")
+    return starts, hop
+
+
+class LatentExcerpts(torch.utils.data.Dataset):
+    """Windows of a latent stream precomputed by `encode_latents.py`.
+
+    The autoencoder is 89% of a training step, so a long run is far better spent
+    training from latents written once. Crops still land on arbitrary latent
+    frames, so the augmentation given up is only waveform-domain (gain, channel
+    swap); mask shape carries the rest.
+    """
+
+    def __init__(self, path, seconds: float = 190.0, sample_rate: int = 44100,
+                 ratio: int = 4096, prompt: str = "", epoch: int = 1000,
+                 index=None, min_rms: float = 0.0, min_sub: float = 0.0):
+        self.z = np.load(path, mmap_mode="r")
+        self.fps = sample_rate / ratio
+        self.frames = round(seconds * self.fps)
+        self.seconds, self.prompt, self.epoch = seconds, prompt, epoch
+        self.starts = None
+        if index is not None and (min_rms > 0 or min_sub > 0):
+            secs, _ = gated_starts(index, seconds, min_rms, min_sub)
+            self.starts = (secs * self.fps).astype(np.int64)
+            self.starts = self.starts[self.starts + self.frames <= self.z.shape[1]]
+        self.hours = self.z.shape[1] / self.fps / 3600
+
+    def __len__(self) -> int:
+        return self.epoch
+
+    def _window(self, frame: int):
+        frame = int(min(max(frame, 0), self.z.shape[1] - self.frames))
+        z = torch.from_numpy(np.asarray(self.z[:, frame:frame + self.frames])).float()
+        return z, {"prompt": self.prompt, "seconds_total": self.seconds}
+
+    def __getitem__(self, _):
+        if self.starts is not None:
+            return self._window(random.choice(self.starts))
+        return self._window(random.randint(0, self.z.shape[1] - self.frames))
+
+    def at(self, offset_seconds: float, track: int = 0):
+        return self._window(round(offset_seconds * self.fps))
+
+    def __repr__(self) -> str:
+        gate = "" if self.starts is None else f", gated to {len(self.starts)} windows"
+        return (f"LatentExcerpts({self.hours:.1f} h of latents, "
+                f"{self.seconds:.0f}s = {self.frames} frames{gate})")
+
+
 class Excerpts(torch.utils.data.Dataset):
     """Fixed-length stereo excerpts drawn uniformly from a set of tracks.
 
@@ -49,15 +108,8 @@ class Excerpts(torch.utils.data.Dataset):
 
         self.starts = None
         if index is not None and (min_rms > 0 or min_sub > 0):
-            d = np.load(index)
-            hop, k = float(d["hop"]), max(1, round(seconds / float(d["hop"])))
-            box = np.ones(k) / k
-            keep = ((np.convolve(d["rms"], box, "valid") >= min_rms)
-                    & (np.convolve(d["sub"], box, "valid") >= min_sub))
-            self.starts = np.flatnonzero(keep) * hop
-            self.kept_hours = len(self.starts) * hop / 3600  # starts are hop-spaced, not window-spaced
-            if not len(self.starts):
-                raise ValueError("energy gate rejected the entire source; lower the thresholds")
+            self.starts, hop = gated_starts(index, seconds, min_rms, min_sub)
+            self.kept_hours = len(self.starts) * hop / 3600  # starts are hop-spaced
 
     def __len__(self) -> int:
         return self.epoch
