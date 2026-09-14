@@ -5,7 +5,7 @@ license: other
 # stems-loop
 
 Full finetune of [Stable Audio 3 Medium](https://huggingface.co/stabilityai/stable-audio-3-medium)
-for **outpainting** a single track: give it the first part of the audio, it generates what comes next.
+for **outpainting**: give it the first part of some audio, it generates what comes next.
 
 Stable Audio 3 already ships with inpainting conditioning (`inpaint_mask` and
 `inpaint_masked_input` as local-additive conditions), and its `CAUSAL_MASK` mode
@@ -24,7 +24,7 @@ so the finetune changes no architecture at all: only the DiT weights move.
 
 ```bash
 python fetch_model.py                      # ~4.6 GB instead of 10.4 GB
-python train.py --audio track.flac --prompt "..."
+python train.py --audio track.flac
 tensorboard --logdir runs
 ```
 
