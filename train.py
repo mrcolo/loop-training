@@ -116,7 +116,7 @@ def demo(model, cond, z, steps: int, tb, step: int, out: Path, sr: int):
     c = {k: tuple(t[:1] for t in v) for k, v in cond.items()}
     c["inpaint_mask"], c["inpaint_masked_input"] = [mask], [z * mask]
 
-    sigmas = build_schedule(steps, dist_shift=model.dist_shift,
+    sigmas = build_schedule(steps, dist_shift=model.sampling_dist_shift,
                             effective_seq_len=z.shape[-1], device=z.device)
     with torch.autocast("cuda", torch.bfloat16):
         sampled = sample_flow_pingpong(model, torch.randn_like(z), sigmas, disable_tqdm=True, cond=c)
@@ -176,9 +176,16 @@ def main():
     torch.cuda.empty_cache()
 
     dit = model.model.requires_grad_(True).train()
+    # Checkpoints store the delta from these weights, not the weights themselves.
+    # The learned update averages 8.9e-5 against a mean weight of 0.049; rounding
+    # the weights to 16 bits quantises the update away, since the bfloat16 step at
+    # that magnitude is 1.9e-4. Deltas are small, and float16 is relative-precision,
+    # so the same file size keeps them essentially exactly.
+    base = {k: v.detach().clone().cpu() for k, v in dit.state_dict().items()}
     start = 0
     if a.resume:  # weights only; float32 Adam moments are 11.6 GB and not worth the disk
-        dit.load_state_dict({k: v.float() for k, v in load_file(a.resume).items()})
+        delta = load_file(a.resume)
+        dit.load_state_dict({k: v + delta[k].to(v.dtype).to(v.device) for k, v in dit.state_dict().items()})
         with safe_open(a.resume, framework="pt") as f:
             start = int(f.metadata()["step"])
     # The reference trains weight matrices with Muon at 1e-5 and 1D tensors (norm
@@ -281,7 +288,8 @@ def main():
                 t0 = time.time()
 
             if step % a.save_every == 0 or step == a.steps:
-                save_file({k: v.to(torch.bfloat16) for k, v in dit.state_dict().items()},
+                save_file({k: (v.detach().cpu() - base[k]).to(torch.float16)
+                           for k, v in dit.state_dict().items()},
                           a.out / "dit.safetensors", metadata={"step": str(step)})
                 print(f"saved at step {step}", flush=True)
 

@@ -28,6 +28,8 @@ def main():
     p.add_argument("--out", type=Path, default=Path("samples"))
     p.add_argument("--resume", type=Path, help="finetuned dit.safetensors; omit for the base model")
     p.add_argument("--tag", default="model")
+    p.add_argument("--bf16-roundtrip", action="store_true",
+                   help="diagnostic: quantise weights to bfloat16 and back")
     p.add_argument("--alpha", type=float, default=1.0,
                    help="blend toward the base: 0 = pretrained, 1 = fully finetuned")
     p.add_argument("--prompt", default='TrackType: Music, VocalType: Instrumental, Genre: Electronic. Electronic dance music recorded from a live DJ set, club sound system, driving drums and synthesizer bass.')
@@ -44,11 +46,14 @@ def main():
     cfg, model = load(a.model, dev)
     model.pretransform.to(torch.bfloat16)
     if a.resume:
-        tuned = {k: v.float() for k, v in load_file(a.resume).items()}
-        if a.alpha != 1.0:  # WiSE-FT: keep the base model's behaviour, add a fraction of the finetune
-            base = model.model.state_dict()
-            tuned = {k: (1 - a.alpha) * base[k].float().cpu() + a.alpha * v for k, v in tuned.items()}
-        model.model.load_state_dict(tuned)
+        delta = load_file(a.resume)  # checkpoints hold the delta, not the weights
+        # alpha scales the update: 0 recovers the base model, 1 the full finetune.
+        model.model.load_state_dict(
+            {k: v + a.alpha * delta[k].to(v.dtype).to(v.device)
+             for k, v in model.model.state_dict().items()})
+    if a.bf16_roundtrip:
+        sd = model.model.state_dict()
+        model.model.load_state_dict({k: v.to(torch.bfloat16).float() for k, v in sd.items()})
     model.eval()
 
     sr = cfg["sample_rate"]
@@ -65,7 +70,10 @@ def main():
         c = dict(cond)
         c["inpaint_mask"], c["inpaint_masked_input"] = [mask], [z * mask]
         torch.manual_seed(a.seed)
-        sigmas = build_schedule(a.steps, dist_shift=model.dist_shift,
+        # Inference uses sampling_dist_shift, not the training-time dist_shift.
+        # They are different objects and the model defaults the sampling one to a
+        # LogSNR schedule; using the training shift here warps the whole trajectory.
+        sigmas = build_schedule(a.steps, dist_shift=model.sampling_dist_shift,
                                effective_seq_len=z.shape[-1], device=dev)
         with torch.autocast("cuda", torch.bfloat16):
             out = sample_flow_pingpong(model, torch.randn_like(z), sigmas, disable_tqdm=True, cond=c)
