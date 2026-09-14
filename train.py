@@ -57,6 +57,36 @@ def outpaint_mask(latents: torch.Tensor, p_full: float):
 
 
 @torch.no_grad()
+def frozen_val(model, data, dev, n_excerpts: int = 4, n_t: int = 4):
+    """Freeze a validation slice: the same excerpts, masks, timesteps and noise
+    every time. Training loss is a single batch at a random timestep and swings
+    far too much to read; this is the number that actually shows learning."""
+    torch.manual_seed(0)
+    items = []
+    for i in range(n_excerpts):
+        with torch.autocast("cuda", torch.bfloat16):
+            z = model.pretransform.encode(data.at(600 + i * 7200)[0][None].to(dev)).float()
+        mask = torch.ones_like(z[:, :1])
+        mask[..., int(z.shape[-1] * (0.25 + 0.5 * i / max(n_excerpts - 1, 1))):] = 0
+        for j in range(n_t):
+            items.append((z, mask, torch.full((1,), (j + 0.5) / n_t, device=dev), torch.randn_like(z)))
+    return items
+
+
+@torch.no_grad()
+def validate(model, cond, items) -> float:
+    c = {k: tuple(x[:1] for x in v) for k, v in cond.items()}
+    total = 0.0
+    for z, mask, t, noise in items:
+        c["inpaint_mask"], c["inpaint_masked_input"] = [mask], [z * mask]
+        with torch.autocast("cuda", torch.bfloat16):
+            pred = model(z * (1 - t[:, None, None]) + noise * t[:, None, None], t, cond=c)
+        gen = (1 - mask).expand_as(z)
+        total += ((pred.float() - (noise - z)).square() * gen).sum().item() / gen.sum().item()
+    return total / len(items)
+
+
+@torch.no_grad()
 def demo(model, cond, z, steps: int, tb, step: int, out: Path, sr: int):
     """Continue the first half of a fixed reference excerpt and log the result."""
     mask = torch.ones_like(z[:, :1])
@@ -90,6 +120,7 @@ def main():
     p.add_argument("--warmup", type=int, default=100)
     p.add_argument("--p-full", type=float, default=0.1, help="fraction of fully masked items")
     p.add_argument("--workers", type=int, default=2)
+    p.add_argument("--val-every", type=int, default=50)
     p.add_argument("--demo-every", type=int, default=250)
     p.add_argument("--demo-at", type=float, default=3600.0, help="offset of the reference excerpt, seconds")
     p.add_argument("--demo-steps", type=int, default=8)
@@ -124,6 +155,7 @@ def main():
     # One fixed excerpt, encoded once, so the demos are comparable step to step.
     with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
         ref = model.pretransform.encode(data.at(a.demo_at)[0][None].to(dev)).float()
+    val_items = frozen_val(model, data, dev)
 
     tb = SummaryWriter(a.out / "tb")
     tb.add_text("config", "\n".join(f"{k} = {v}" for k, v in vars(a).items()), 0)
@@ -166,6 +198,12 @@ def main():
                 tb.add_scalar("train/sec_per_step", dt, step)
                 tb.add_scalar("train/gpu_gb", torch.cuda.max_memory_allocated() / 2**30, step)
                 print(f"step {step:6d}  loss {loss.item():.4f}  {dt:.2f}s/step", flush=True)
+                t0 = time.time()
+
+            if step % a.val_every == 0 or step == 1:
+                dit.eval()
+                tb.add_scalar("val/loss", validate(model, cond, val_items), step)
+                dit.train()
                 t0 = time.time()
 
             if step % a.demo_every == 0 or step == 1:
