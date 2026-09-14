@@ -12,6 +12,9 @@ Three files do the work. No training framework, no config trees, no Lightning.
 | [`train.py`](train.py) | the finetune: online autoencoding, causal masks, rectified-flow loss |
 | [`fetch_model.py`](fetch_model.py) | downloads the checkpoint, converting float32 to bfloat16 in flight |
 
+A write-up of the method, with figures and the full hyperparameter set, is in
+[`paper/stems-loop.pdf`](paper/stems-loop.pdf) ([source](paper/stems-loop.tex)).
+
 ---
 
 ## How the outpainting works

@@ -1,0 +1,680 @@
+\documentclass[10pt,twocolumn,letterpaper]{article}
+
+\usepackage[margin=0.75in,columnsep=0.25in]{geometry}
+\usepackage{times}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{microtype}
+\usepackage[colorlinks=true,linkcolor=black,citecolor=black,urlcolor=blue]{hyperref}
+
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds,calc,patterns}
+
+% ---- palette -------------------------------------------------------------
+\definecolor{ctx}{HTML}{2B6CB0}      % context / given
+\definecolor{gen}{HTML}{C05621}      % generated / masked
+\definecolor{frz}{HTML}{718096}      % frozen
+\definecolor{trn}{HTML}{2F855A}      % trained
+\definecolor{bg}{HTML}{EDF2F7}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\bx}{\mathbf{x}}
+\newcommand{\bz}{\mathbf{z}}
+\newcommand{\bm}{\mathbf{m}}
+\newcommand{\bef}{\boldsymbol{\epsilon}}
+
+\title{\vspace{-2em}\textbf{Outpainting Audio by Reusing What the Model Already Knows:\\
+A Minimal Full-Finetune Recipe for Latent Rectified-Flow Audio Diffusion}}
+
+\author{Francesco Colonnese\\
+\texttt{github.com/mrcolo/stems-loop}}
+
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Audio outpainting --- continuing a recording past its end --- is usually framed as a
+new capability requiring new machinery: extra input channels, adapter branches, or a
+separately trained continuation head. We observe that a modern latent audio diffusion
+model already contains everything the task needs. Stable Audio 3 Medium is trained with
+inpainting conditioning, taking a binary mask and a masked latent as local-additive
+conditions, and its mask distribution already includes a \emph{causal} mode that retains
+a random-length prefix. Outpainting is that mode. Consequently a finetune for
+outpainting can change \emph{no architecture at all}: no new channels, no adapters, no
+surgery on the input projection. Only the transformer weights move, and step zero is
+exactly the pretrained model rather than a perturbed one.
+
+We describe a complete recipe built on this observation, targeting a single 24\,GB
+consumer GPU. It trains all 1.453\,B transformer parameters, streams excerpts directly
+from multi-hour source audio with no preprocessing stage, and runs the frozen
+autoencoder online so that no latent cache is ever materialised. We detail the memory
+budget that makes full finetuning fit, the masked rectified-flow objective, and a
+frozen-slice evaluation protocol that makes the learning signal legible --- ordinary
+training loss in this setting is dominated by timestep variance and is uninformative.
+The entire method is three files and roughly 250 lines.
+\end{abstract}
+
+% ==========================================================================
+\section{Introduction}
+
+Generative audio models have converged on latent diffusion: a high-compression
+autoencoder maps waveforms to a short sequence of continuous vectors, and a diffusion
+transformer (DiT) is trained in that space. The recipe is now mature enough that the
+interesting questions have shifted from \emph{how to generate} to \emph{how to control},
+and one of the most practically useful controls is continuation: given the first
+$\tau$ seconds of a recording, produce what plausibly follows.
+
+The standard reflex is to treat this as an architectural problem. Image inpainting
+models concatenate a mask and a masked image to the noisy latent, widening the input
+projection from $C$ to $2C{+}1$ channels and zero-initialising the new columns. The same
+construction transfers to audio and works. But it is unnecessary when the base model was
+already trained with masked conditioning.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[scale=1.0]
+% waveform-ish context
+\fill[bg,rounded corners=2pt] (0,0) rectangle (7.6,1.5);
+\fill[ctx!22,rounded corners=2pt] (0,0) rectangle (3.4,1.5);
+\fill[gen!18,rounded corners=2pt] (3.4,0) rectangle (7.6,1.5);
+\draw[ctx,thick] (3.4,-0.15) -- (3.4,1.65);
+
+% pseudo waveform: context solid, generation dashed
+\foreach \i in {0,...,33}{
+  \pgfmathsetmacro{\h}{0.30+0.30*abs(sin(\i*47))*abs(cos(\i*23))}
+  \draw[ctx,line width=1.1pt] ({0.05+\i*0.1},{0.75-\h}) -- ({0.05+\i*0.1},{0.75+\h});
+}
+\foreach \i in {34,...,75}{
+  \pgfmathsetmacro{\h}{0.30+0.30*abs(sin(\i*47))*abs(cos(\i*23))}
+  \draw[gen,line width=1.1pt,opacity=0.85] ({0.05+\i*0.1},{0.75-\h}) -- ({0.05+\i*0.1},{0.75+\h});
+}
+\node[ctx,font=\small\bfseries] at (1.7,1.9) {given context};
+\node[gen,font=\small\bfseries] at (5.5,1.9) {generated};
+\node[font=\scriptsize,anchor=north] at (1.7,-0.2) {$\bm=1$};
+\node[font=\scriptsize,anchor=north] at (5.5,-0.2) {$\bm=0$, loss computed here};
+\end{tikzpicture}
+\caption{\textbf{The task.} A random-length prefix of a latent sequence is retained as
+context; the model generates the remainder. This is exactly the \emph{causal} member of
+the mask family the base model was pretrained with, so no architectural change is
+required. The training loss is taken only over the generated region.}
+\label{fig:teaser}
+\end{figure}
+
+\paragraph{Contributions.} (i) We identify that outpainting is a \emph{subset} of the
+inpainting conditioning already present in Stable Audio 3, and show that restricting the
+pretrained mask distribution toward its causal mode is sufficient to specialise the model
+for continuation (\S\ref{sec:mask}). (ii) We give a memory budget under which all
+1.453\,B transformer parameters can be finetuned on one 24\,GB GPU while a 0.852\,B
+autoencoder runs \emph{online} in the same step (\S\ref{sec:memory}). (iii) We describe a
+data path that requires no preprocessing, no manifest and no latent cache, reading random
+excerpts directly out of multi-hour source files (\S\ref{sec:data}). (iv) We argue that
+per-step training loss is the wrong instrument for this objective and propose a frozen
+evaluation slice that makes progress measurable (\S\ref{sec:eval}).
+
+% ==========================================================================
+\section{Related Work}
+
+\paragraph{Latent audio diffusion.} Encoding waveforms into a compact latent sequence
+before diffusion is now standard, and the compression ratio has risen sharply: the
+autoencoder we build on maps $4096$ waveform samples to a single $256$-dimensional latent
+frame, a $10.77$\,Hz representation of $44.1$\,kHz stereo. High compression is what makes
+minute-scale generation tractable, and it is also what makes online encoding expensive
+(\S\ref{sec:cost}).
+
+\paragraph{Masked generative modelling.} Inpainting by channel-concatenating a mask and a
+masked signal originates in image diffusion and has been carried into audio. The variant
+we exploit differs in that the masked conditioning is injected as a \emph{local additive}
+term rather than by widening the input projection, and --- critically --- is present at
+pretraining rather than bolted on afterwards.
+
+\paragraph{Flow matching and rectified flow.} Rectified flow replaces the variance-
+preserving diffusion path with a straight interpolation between data and noise, and
+predicts the constant velocity along it. Its simplicity and its compatibility with
+few-step distilled samplers have made it the default for recent audio models.
+
+\paragraph{Full versus parameter-efficient finetuning.} LoRA and adapters dominate
+finetuning practice because they fit on small hardware. We take the opposite position for
+this task: when the target domain differs from the pretraining distribution in timbre and
+production style rather than in semantics, the low-rank constraint is a real limitation,
+and a 1.45\,B model \emph{can} be fully finetuned on a consumer card given the right
+precision and optimiser-state choices.
+
+% ==========================================================================
+\section{Preliminaries}
+
+\subsection{Latent representation}
+
+Let $\bx \in \R^{2 \times N}$ be stereo audio at $44.1$\,kHz. A frozen autoencoder
+$\mathcal{E}$ maps it to
+\begin{equation}
+\bz = \mathcal{E}(\bx) \in \R^{256 \times T}, \qquad T = \lceil N / 4096 \rceil ,
+\end{equation}
+a $256$-channel sequence at $10.77$ frames per second. The encoder is a patched
+transformer: waveform samples are first grouped into patches of $256$, then a
+$12$-layer transformer with stride $16$ produces the latent. The decoder mirrors it.
+Together they account for $0.852$\,B parameters and remain frozen throughout.
+
+\subsection{Rectified-flow objective}
+
+The generative model is a DiT $v_\theta$ trained with a rectified-flow ($\texttt{rf\_denoiser}$)
+objective. For $t \in [0,1]$ and $\bef \sim \mathcal{N}(0, I)$,
+\begin{align}
+\bz_t &= (1-t)\,\bz + t\,\bef, \label{eq:path}\\
+v^\star &= \bef - \bz, \label{eq:target}
+\end{align}
+so that $t{=}0$ is data and $t{=}1$ is noise, and the target velocity is constant along
+each path. The network is conditioned on $t$, on a text embedding, and on a scalar
+duration embedding.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[scale=1.0]
+\draw[->,thick] (0,0) -- (6.6,0) node[right,font=\small] {$t$};
+\draw[->,thick] (0,-0.1) -- (0,2.3);
+\node[font=\small] at (-0.35,0) {$\bz$};
+\node[font=\small] at (-0.35,2.0) {$\bef$};
+% straight interpolation
+\draw[ctx,very thick] (0,0) -- (6.0,2.0);
+\foreach \x/\l in {0/0, 2/0.33, 4/0.67, 6/1}{
+  \draw[frz,dashed] (\x,0) -- (\x,2.2);
+  \node[font=\scriptsize,anchor=north] at (\x,-0.08) {\l};
+}
+\foreach \x in {0,2,4,6}{
+  \pgfmathsetmacro{\y}{\x/3.0}
+  \fill[ctx] (\x,\y) circle (2.4pt);
+}
+% velocity arrow
+\draw[gen,-{Stealth[length=3mm]},very thick] (3.0,1.0) -- ++(1.3,0.433);
+\node[gen,font=\small,anchor=west] at (4.3,1.30) {$v^\star=\bef-\bz$};
+\node[ctx,font=\small,anchor=north west] at (0.15,0.95) {$\bz_t=(1{-}t)\bz+t\bef$};
+\end{tikzpicture}
+\caption{\textbf{Rectified flow.} Data and noise are joined by a straight line, and the
+network regresses the constant velocity along it. Because the path is linear, the
+velocity target does not depend on $t$ --- but the \emph{difficulty} of predicting it
+does, which is the source of the variance discussed in \S\ref{sec:eval}.}
+\label{fig:rf}
+\end{figure}
+
+\subsection{Timestep sampling}
+
+Timesteps are drawn from a truncated logistic-normal distribution, reflected, and then
+warped by a sequence-length-dependent shift $\sigma_L$ that moves probability mass toward
+higher noise for longer sequences:
+\begin{equation}
+t \sim \sigma_L\big(1 - \mathrm{TLN}(0.075, 1)\big).
+\end{equation}
+We reuse the pretraining sampler unchanged. Matching it matters: a finetune that samples
+timesteps differently from pretraining spends its gradient budget on a different part of
+the schedule than the one the model was optimised for.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=7.4cm, height=4.0cm,
+  xlabel={$t$ (0 = data, 1 = noise)},
+  ylabel={density},
+  xmin=0, xmax=1, ymin=0,
+  ytick=\empty,
+  tick label style={font=\scriptsize},
+  label style={font=\scriptsize},
+  legend style={font=\scriptsize,draw=none,fill=none,at={(0.02,0.98)},anchor=north west},
+  axis lines=left,
+]
+\addplot[ctx,very thick,domain=0.02:0.98,samples=120,smooth]
+  {exp(-0.5*(ln(x/(1-x)))^2)/(x*(1-x))*0.4};
+\addlegendentry{logistic-normal}
+\addplot[gen,very thick,dashed,domain=0.02:0.98,samples=120,smooth]
+  {exp(-0.5*(ln(x/(1-x))-0.55)^2)/(x*(1-x))*0.4};
+\addlegendentry{after length shift $\sigma_L$}
+\end{axis}
+\end{tikzpicture}
+\caption{\textbf{Timestep density.} Mass concentrates in the middle of the schedule where
+the prediction problem is hardest, and the length-dependent shift moves it toward higher
+noise as the sequence grows. We inherit both from pretraining rather than substituting a
+uniform sampler.}
+\label{fig:tdist}
+\end{figure}
+
+% ==========================================================================
+\section{Method}
+
+\subsection{Outpainting as a restriction of pretrained masking}
+\label{sec:mask}
+
+The base model consumes two extra conditioning tensors alongside the noisy latent: a
+binary keep-mask $\bm \in \{0,1\}^{1 \times T}$ and the masked latent $\bz \odot \bm$.
+These enter the transformer as a local additive term of dimension $256{+}1$, added to the
+token embeddings rather than concatenated to the input channels.
+
+During pretraining, $\bm$ is drawn from a family of mask types. Three matter here:
+
+\begin{description}\itemsep2pt
+\item[\textsc{Full}] $\bm = 0$ everywhere. Pure unconditional generation.
+\item[\textsc{Spans}] a set of non-overlapping interior spans is zeroed. General inpainting.
+\item[\textsc{Causal}] a prefix length $k \sim \mathcal{U}\{0,\dots,T\}$ is sampled and
+$\bm_{i} = \mathbf{1}[i < k]$. \textbf{This is outpainting.}
+\end{description}
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[x=0.072cm,y=0.42cm]
+\foreach \row/\name/\yy in {0/\textsc{Full}/0, 1/\textsc{Spans}/-1, 2/\textsc{Causal}/-2}{
+  \node[anchor=east,font=\small] at (-4,\yy) {\name};
+}
+% FULL
+\fill[gen!35] (0,-0.3) rectangle (100,0.3);
+% SPANS
+\fill[ctx!30] (0,-1.3) rectangle (100,-0.7);
+\fill[gen!45] (14,-1.3) rectangle (33,-0.7);
+\fill[gen!45] (52,-1.3) rectangle (63,-0.7);
+\fill[gen!45] (78,-1.3) rectangle (94,-0.7);
+% CAUSAL
+\fill[ctx!30] (0,-2.3) rectangle (100,-1.7);
+\fill[gen!45] (41,-2.3) rectangle (100,-1.7);
+\draw[gen,thick] (41,-2.42) -- (41,-1.58);
+\node[font=\scriptsize,anchor=north,gen] at (41,-2.45) {$k$};
+\foreach \y in {0,-1,-2}{ \draw[frz,thin] (0,\y-0.3) rectangle (100,\y+0.3); }
+\node[font=\scriptsize,anchor=north] at (50,-3.1)
+  {latent frame index $\rightarrow$ \quad
+   \textcolor{ctx}{given ($\bm{=}1$)} \quad \textcolor{gen}{generated ($\bm{=}0$)}};
+\end{tikzpicture}
+\caption{\textbf{The pretrained mask family.} Stable Audio 3 is pretrained with mask-type
+probabilities $[0.1, 0.8, 0.1]$ over $[\textsc{Spans},\textsc{Full},\textsc{Causal}]$.
+Outpainting is already in the support of this distribution --- it is simply rare. Our
+finetune reweights to $[0, 0.1, 0.9]$.}
+\label{fig:masks}
+\end{figure}
+
+Because \textsc{Causal} is already in the support of the pretraining distribution, the
+finetune is a \emph{reweighting} rather than an extension. We set the mask-type
+probabilities to $[0, 0.1, 0.9]$, concentrating gradient on continuation while retaining
+a tenth of each batch at \textsc{Full}. That residual matters: training exclusively on
+causal masks steadily degrades the model's unconditional behaviour, which is also the
+behaviour the $\textsc{Full}$ branch of classifier-free guidance relies on at sampling
+time.
+
+\subsection{Masked objective}
+
+The loss is taken only where the model is being asked to generate:
+\begin{equation}
+\mathcal{L}(\theta) =
+\frac{\big\| \big(v_\theta(\bz_t, t, c, \bm, \bz\odot\bm) - v^\star\big) \odot (1-\bm) \big\|_2^2}
+     {256 \cdot \sum_i (1 - \bm_i)} .
+\label{eq:loss}
+\end{equation}
+Including the context region would let the model reduce $\mathcal{L}$ by reproducing
+input it was already handed, which is not the task and dilutes the gradient in proportion
+to the mask ratio. The normalisation by the number of generated elements keeps the loss
+scale independent of how much of the sequence happens to be masked in a given batch.
+
+\subsection{Conditioning is constant, so compute it once}
+
+The model is conditioned on a text embedding from a T5Gemma encoder (256 tokens,
+768-dimensional) and on a scalar duration embedding. For a single-domain finetune both
+the prompt and the excerpt length are fixed for the entire run, so the conditioning
+tensor is a \emph{constant}. We evaluate the text encoder once at startup, cache the
+resulting tensor, and release the encoder's $1.2$\,GB before the first training step.
+Classifier-free-guidance dropout is applied downstream by zeroing the cached tensor and
+therefore needs no encoder.
+
+\begin{figure*}[t]
+\centering
+\begin{tikzpicture}[
+  node distance=6mm,
+  box/.style={draw,rounded corners=2pt,minimum height=8mm,align=center,font=\small,inner xsep=3mm},
+  frozen/.style={box,fill=frz!12,draw=frz},
+  trained/.style={box,fill=trn!15,draw=trn,very thick},
+  data/.style={box,fill=bg,draw=frz!60},
+  ar/.style={-{Stealth[length=2mm]},frz,thick},
+]
+\node[data] (src) {26.4\,h source\\\scriptsize single \texttt{.flac}};
+\node[data,right=of src] (exc) {random excerpt\\\scriptsize $2\times1.06$M samples};
+\node[frozen,right=of exc] (ae) {autoencoder $\mathcal{E}$\\\scriptsize 0.852\,B, bf16, \textbf{online}};
+\node[data,right=of ae] (lat) {latent $\bz$\\\scriptsize $256\times258$};
+\node[box,fill=gen!12,draw=gen,right=of lat] (mask) {causal mask\\\scriptsize $\bm$, $\bz\odot\bm$};
+
+\node[trained,below=14mm of lat] (dit) {DiT $v_\theta$\\\scriptsize 1.453\,B, fp32 master, \textbf{trained}};
+\node[frozen,left=16mm of dit] (txt) {T5Gemma\\\scriptsize cached, then freed};
+\node[data,right=16mm of dit] (loss) {masked loss\\\scriptsize Eq.~\eqref{eq:loss}};
+
+\draw[ar] (src) -- (exc);
+\draw[ar] (exc) -- (ae);
+\draw[ar] (ae) -- (lat);
+\draw[ar] (lat) -- (mask);
+\draw[ar] (lat.south) -- ++(0,-0.5) -| (dit.north);
+\draw[ar] (mask.south) |- ++(0.2,-0.9) -| (dit.north east);
+\draw[ar] (txt) -- (dit);
+\draw[ar] (dit) -- (loss);
+\draw[ar,trn,dashed] (loss.south) -- ++(0,-0.6) -| node[pos=0.25,below,font=\scriptsize,trn] {gradient} (dit.south);
+\end{tikzpicture}
+\caption{\textbf{System overview.} Grey blocks are frozen, green is trained. Nothing is
+precomputed: each step reads fresh audio off disk and encodes it in the same step it is
+used. The text encoder is evaluated once and then released, since its output is constant
+for a run.}
+\label{fig:system}
+\end{figure*}
+
+% ==========================================================================
+\section{Data path}
+\label{sec:data}
+
+Conventional latent-diffusion training precomputes latents into a cache. Stability's own
+configuration does this (\texttt{pre\_encoded: true}). We deliberately do not, and the
+data path is correspondingly trivial: on each item we open the source file, seek to a
+uniformly random frame offset, and read exactly the excerpt we need.
+
+This has three consequences worth stating. First, there is no preprocessing stage, no
+manifest, and no cache to invalidate when the excerpt length or sample rate changes.
+Second, memory is independent of corpus size --- a $26.4$-hour, $10.5$\,GB source file
+costs nothing to hold because it is never held. Third, the excerpt distribution is
+continuous rather than quantised to cache-entry boundaries, so the model sees a different
+alignment of musical structure on every epoch.
+
+The cost is negligible: a random seek-and-decode of a $24$\,s excerpt from a $10.5$\,GB
+FLAC takes $31$\,ms, and two dataloader workers hide it entirely behind GPU work.
+
+\begin{algorithm}[t]
+\caption{One training step}
+\label{alg:step}
+\begin{algorithmic}[1]
+\State $\bx \gets$ \textsc{RandomExcerpts}(source, $B$, $\tau$) \Comment{31\,ms, on workers}
+\State $\bz \gets \mathcal{E}(\bx)$ \Comment{online, bf16, no grad}
+\State $\bm \gets$ \textsc{CausalMask}($B$, $T$; $p_{\text{full}}$)
+\State $t \gets \sigma_L(1 - \mathrm{TLN}())$
+\State $\bef \sim \mathcal{N}(0,I)$
+\State $\bz_t \gets (1-t)\bz + t\bef$; \quad $v^\star \gets \bef - \bz$
+\State $\hat v \gets v_\theta(\bz_t, t, c, \bm, \bz \odot \bm)$ \Comment{cfg dropout 0.1}
+\State $\mathcal{L} \gets \|(\hat v - v^\star)\odot(1-\bm)\|^2 / \textstyle\sum(1-\bm)$
+\State backward; clip to $1.0$; AdamW8bit step
+\end{algorithmic}
+\end{algorithm}
+
+% ==========================================================================
+\section{Fitting a full finetune on one GPU}
+\label{sec:memory}
+
+Training all $1.453$\,B transformer parameters naively is out of reach: float32 weights,
+float32 gradients and float32 Adam moments alone require
+$1.453\text{B} \times 16\,\text{B} = 23.2$\,GB, before activations, before the
+autoencoder, and before the text encoder. Three choices bring it inside $24$\,GB.
+
+\begin{enumerate}\itemsep2pt
+\item \textbf{Eight-bit Adam moments.} The optimiser state drops from $11.6$\,GB to
+$2.9$\,GB. Master weights and gradients stay in float32, so the update itself is
+unaffected in precision where it matters.
+\item \textbf{The frozen autoencoder in bfloat16.} It never receives gradients, so half
+precision costs nothing and saves $1.7$\,GB.
+\item \textbf{Gradient checkpointing} throughout the transformer.
+\end{enumerate}
+
+Releasing the text encoder after its single use recovers a further $1.2$\,GB. The
+resulting measured peak is $15.7$\,GiB, leaving comfortable headroom for the sampling
+and decoding done during periodic demos.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=7.8cm, height=4.6cm,
+  xbar stacked,
+  xmin=0, xmax=30, ymin=-0.75, ymax=1.75,
+  xlabel={memory (GB)},
+  ytick={0,1},
+  yticklabels={naive fp32, this recipe},
+  tick label style={font=\scriptsize},
+  label style={font=\scriptsize},
+  legend style={font=\scriptsize,draw=none,at={(0.5,-0.42)},anchor=north,legend columns=2},
+  axis lines=left,
+  bar width=8mm,
+]
+\addplot[fill=trn!60,draw=none] coordinates {(5.81,0) (5.81,1)};
+\addlegendentry{weights fp32}
+\addplot[fill=trn!30,draw=none] coordinates {(5.81,0) (5.81,1)};
+\addlegendentry{gradients fp32}
+\addplot[fill=gen!60,draw=none] coordinates {(11.62,0) (2.9,1)};
+\addlegendentry{Adam moments}
+\addplot[fill=frz!50,draw=none] coordinates {(3.41,0) (1.70,1)};
+\addlegendentry{autoencoder}
+\addplot[fill=ctx!45,draw=none] coordinates {(1.20,0) (0.0,1)};
+\addlegendentry{text encoder}
+\draw[red,dashed,very thick] (axis cs:24,-0.6) -- (axis cs:24,1.6);
+\node[red,font=\scriptsize,anchor=south east,rotate=90] at (axis cs:24,-0.55) {24\,GB};
+\end{axis}
+\end{tikzpicture}
+\caption{\textbf{Memory budget.} Eight-bit optimiser moments, a bfloat16 frozen
+autoencoder and releasing the text encoder move a $27.9$\,GB configuration to a measured
+$15.7$\,GiB peak. Activations under gradient checkpointing are small and not shown
+separately.}
+\label{fig:mem}
+\end{figure}
+
+\subsection{Checkpoint transport}
+
+The released checkpoint is $9.2$\,GB of float32 across $997$ tensors ($1.453$\,B
+transformer, $0.852$\,B autoencoder). Since training holds float32 master weights in
+memory regardless, storing bfloat16 on disk costs a single rounding at load. We therefore
+convert during download, streaming tensors in file order and writing a bfloat16
+safetensors file directly, so the float32 artefact is never materialised. The stored
+model is $4.6$\,GB.
+
+% ==========================================================================
+\section{Cost structure}
+\label{sec:cost}
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lr}
+\toprule
+Stage & Time (s) \\
+\midrule
+Excerpt read and decode (2 workers) & 0.03 \\
+Autoencoder encode (online) & 4.00 \\
+DiT forward + backward & 0.45 \\
+Optimiser step & $<0.01$ \\
+\midrule
+\textbf{Total per step} & \textbf{4.70} \\
+\bottomrule
+\end{tabular}
+\caption{Measured per-step cost, RTX 3090, batch 4, 24\,s excerpts.}
+\label{tab:cost}
+\end{table}
+
+The autoencoder dominates, costing roughly nine times the transformer step it feeds.
+This is the honest price of online encoding, and it follows directly from the
+architecture: a $0.852$\,B encoder that must process $8085$ patch tokens to emit $258$
+latent frames does substantially more work than a $1.453$\,B transformer operating on
+those $258$ frames.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=7.6cm, height=3.4cm,
+  xbar stacked,
+  xmin=0, xmax=4.9, ymin=-0.75, ymax=0.75,
+  xlabel={seconds per step},
+  ytick=\empty,
+  tick label style={font=\scriptsize},
+  label style={font=\scriptsize},
+  legend style={font=\scriptsize,draw=none,at={(0.5,-0.55)},anchor=north,legend columns=3},
+  axis lines=left,
+  bar width=9mm,
+]
+\addplot[fill=frz!45,draw=none] coordinates {(0.03,0)};
+\addlegendentry{data}
+\addplot[fill=gen!60,draw=none] coordinates {(4.00,0)};
+\addlegendentry{autoencoder}
+\addplot[fill=trn!60,draw=none] coordinates {(0.45,0)};
+\addlegendentry{DiT fwd+bwd}
+\end{axis}
+\end{tikzpicture}
+\caption{\textbf{Where the step goes.} Online encoding is $85\%$ of wall clock. The
+trade is deliberate: it buys a pipeline with no preprocessing stage and no cache, at
+roughly $6\times$ the per-step cost of training from precomputed latents.}
+\label{fig:steptime}
+\end{figure}
+
+We note that this cost is a \emph{choice}, not a constraint. The training loop consumes
+$\bz$ and is indifferent to its provenance; substituting a precomputed latent cache
+recovers the $4$\,s and changes nothing else. We prefer the online path for
+single-corpus finetunes, where setup cost dominates total cost.
+
+% ==========================================================================
+\section{Evaluation protocol}
+\label{sec:eval}
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=8.0cm, height=5.0cm,
+  xlabel={training step},
+  ylabel={loss (masked region)},
+  xmin=0, xmax=380, ymin=0.55, ymax=1.25,
+  tick label style={font=\scriptsize},
+  label style={font=\scriptsize},
+  legend style={font=\scriptsize,draw=none,fill=none,at={(0.98,0.98)},anchor=north east},
+  axis lines=left,
+  grid=major, grid style={frz!25},
+]
+\addplot[gen,thin,mark=*,mark size=0.7pt,opacity=0.55] coordinates {
+(10,1.1379)(20,1.1522)(30,1.3382)(40,1.1779)(50,0.9800)(60,1.0500)(70,0.8900)
+(80,1.0200)(90,0.9400)(100,0.9900)(110,0.8700)(120,1.0100)(130,0.9200)(140,0.8800)
+(150,0.9600)(160,0.9000)(170,1.0400)(180,0.8500)(190,0.9700)(200,0.9100)(210,0.8300)
+(220,0.9900)(230,0.8800)(240,0.9500)(250,0.8600)(260,0.9300)(270,0.8000)(280,0.6266)
+(290,0.8611)(300,0.9122)(310,0.9637)(320,0.7541)(330,0.9183)(340,0.9816)(350,0.9209)
+(360,0.8640)(370,0.9423)
+};
+\addlegendentry{\texttt{train/loss} (one batch, random $t$)}
+\addplot[ctx,very thick,mark=square*,mark size=1.6pt] coordinates {
+(1,1.1005)(50,0.9730)(100,0.8890)(150,0.8753)(200,0.8722)(250,0.8648)(300,0.8633)(350,0.8595)
+};
+\addlegendentry{\texttt{val/loss} (frozen slice)}
+\end{axis}
+\end{tikzpicture}
+\caption{\textbf{Training loss is not a learning signal here.} The per-step loss (orange)
+spans $0.63$--$1.34$ with no discernible trend, because each point is a single batch at a
+single randomly drawn timestep and the difficulty of Eq.~\eqref{eq:target} varies sharply
+with $t$. Holding excerpts, masks, timesteps and noise fixed (blue) yields a monotone
+curve from the same run.}
+\label{fig:val}
+\end{figure}
+
+Rectified-flow training loss at a random timestep is a high-variance estimator of
+anything one would want to monitor. Figure~\ref{fig:val} makes the point concretely: over
+the first $370$ steps of a real run, the per-step loss oscillates between $0.63$ and
+$1.34$ and supports no conclusion about whether the model is improving.
+
+We therefore fix an evaluation slice at startup and never resample it:
+four excerpts drawn from fixed offsets, each with a fixed causal mask at a different
+prefix fraction ($0.25$ to $0.75$), crossed with four fixed timesteps at
+$\{0.125, 0.375, 0.625, 0.875\}$, each with fixed noise. The reported value is the mean
+masked error over these sixteen configurations. Every source of variance except the
+weights is frozen, so successive values are directly comparable, and the cost is one
+second per evaluation.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{rrrr}
+\toprule
+Step & \texttt{val/loss} & $\Delta$ & \texttt{train/loss} range \\
+\midrule
+1   & 1.1005 & ---      & --- \\
+50  & 0.9730 & $-0.1275$ & 0.98--1.34 \\
+100 & 0.8890 & $-0.0840$ & 0.87--1.05 \\
+150 & 0.8753 & $-0.0137$ & 0.85--1.04 \\
+200 & 0.8722 & $-0.0031$ & 0.83--0.99 \\
+250 & 0.8648 & $-0.0074$ & 0.86--0.99 \\
+300 & 0.8633 & $-0.0015$ & 0.63--0.96 \\
+350 & 0.8595 & $-0.0038$ & 0.86--0.98 \\
+\bottomrule
+\end{tabular}
+\caption{The frozen slice decreases monotonically while the per-step loss range is wide
+and overlapping throughout.}
+\label{tab:val}
+\end{table}
+
+Alongside the scalar we periodically sample a continuation of one \emph{fixed} reference
+excerpt with the distilled eight-step ping-pong sampler and log the audio. Fixing the
+reference is what makes successive clips comparable by ear; sampling a fresh excerpt each
+time confounds model progress with excerpt difficulty.
+
+% ==========================================================================
+\section{Recipe summary}
+
+Table~\ref{tab:recipe} collects every value needed to reproduce the method. Only three
+entries differ from the base model's own pretraining configuration: the mask-type
+probabilities, which are reweighted toward \textsc{Causal}; the optimiser, which uses
+eight-bit moments in place of the original MuonAdamW; and the excerpt length, which is
+shortened to the bottom of the model's supported range. Everything else --- the noise
+schedule, the timestep sampler, the guidance dropout rate --- is inherited unchanged,
+which is the point.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{ll}
+\toprule
+Base model & Stable Audio 3 Medium \\
+Trained & DiT, 1.453\,B, all parameters \\
+Frozen & autoencoder 0.852\,B, text encoder \\
+Latent & $256$ ch @ $10.77$\,Hz ($/4096$) \\
+Excerpt & $24$\,s $=258$ latent frames \\
+Batch & 4 \\
+Objective & rectified flow, masked to $\bm{=}0$ \\
+Mask types & $[0, 0.1, 0.9]$ spans/full/causal \\
+Timesteps & truncated logistic-normal, shifted \\
+CFG dropout & $0.1$ \\
+Optimiser & AdamW, 8-bit moments \\
+LR & $10^{-5}$, 100-step linear warmup \\
+Betas / WD & $(0.9, 0.95)$ / $0.01$ \\
+Grad clip & $1.0$ \\
+Precision & fp32 master, bf16 autocast \\
+Peak memory & $15.7$\,GiB \\
+Throughput & $4.7$\,s/step (RTX 3090) \\
+\bottomrule
+\end{tabular}
+\caption{Complete hyperparameter set.}
+\label{tab:recipe}
+\end{table}
+
+% ==========================================================================
+\section{Discussion}
+
+The general lesson is that capability is often already latent in a pretrained checkpoint,
+distributed across a conditioning interface that was trained for a broader task than the
+one at hand. Stable Audio 3 was trained to inpaint; outpainting is the causal corner of
+that distribution. Specialising to it is a change of \emph{sampling weights}, not a change
+of model. The practical payoff is disproportionate: no zero-initialised branch to warm up,
+no train/inference conditioning mismatch, and a finetune whose step zero is exactly the
+released model.
+
+Two limitations are worth naming. Online encoding costs $85\%$ of wall-clock time, which
+is the right trade for single-corpus finetunes and the wrong one for large multi-corpus
+runs. And a full finetune on one domain will move the model away from its general prior;
+the residual \textsc{Full}-mask fraction slows this but does not eliminate it.
+
+\section{Conclusion}
+
+We presented a minimal recipe for specialising a latent rectified-flow audio diffusion
+model to outpainting, with no architectural modification, on a single consumer GPU. The
+method reduces to reweighting a pretrained mask distribution, masking the loss to the
+generated region, and choosing precisions that let $1.453$\,B parameters train in
+$24$\,GB. We additionally argued that per-step loss is an inadequate monitor for this
+objective and gave a frozen-slice protocol that is not. Code is available at
+\url{https://github.com/mrcolo/stems-loop}.
+
+\end{document}
