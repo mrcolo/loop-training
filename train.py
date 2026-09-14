@@ -30,6 +30,7 @@ from torch.utils.tensorboard import SummaryWriter
 from dataset import Excerpts, LatentExcerpts, collate
 from stable_audio_3.inference.sampling import (
     build_schedule,
+    sample_discrete_euler,
     sample_flow_pingpong,
     truncated_logistic_normal_rescaled,
 )
@@ -118,8 +119,10 @@ def demo(model, cond, z, steps: int, tb, step: int, out: Path, sr: int):
 
     sigmas = build_schedule(steps, dist_shift=model.sampling_dist_shift,
                             effective_seq_len=z.shape[-1], device=z.device)
+    sampler = (sample_flow_pingpong if model.diffusion_objective == "rf_denoiser"
+               else sample_discrete_euler)
     with torch.autocast("cuda", torch.bfloat16):
-        sampled = sample_flow_pingpong(model, torch.randn_like(z), sigmas, disable_tqdm=True, cond=c)
+        sampled = sampler(model, torch.randn_like(z), sigmas, disable_tqdm=True, cond=c)
 
     for tag, latent in [("outpaint", sampled)] + ([("truth", z)] if step == 1 else []):
         with torch.autocast("cuda", torch.bfloat16):

@@ -20,6 +20,7 @@ import requests
 import torch
 
 REPO = "https://huggingface.co/stabilityai/stable-audio-3-medium/resolve/main"
+BASE_REPO = "https://huggingface.co/stabilityai/stable-audio-3-medium-base/resolve/main"
 CHUNK = 1 << 20
 
 
@@ -72,31 +73,37 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--out", type=Path, default=Path("models/stable-audio-3-medium"))
     p.add_argument("--token", default=str(Path.home() / ".hf_token"))
+    p.add_argument("--base", action="store_true",
+                   help="fetch stable-audio-3-medium-base, the pre-adversarial checkpoint")
     a = p.parse_args()
     token = Path(a.token).read_text().strip()
+    repo = BASE_REPO if a.base else REPO
     a.out.mkdir(parents=True, exist_ok=True)
 
-    for name in ["model_config.json", "t5gemma-b-b-ul2/config.json", "t5gemma-b-b-ul2/tokenizer.json",
-                 "t5gemma-b-b-ul2/tokenizer.model", "t5gemma-b-b-ul2/tokenizer_config.json",
-                 "t5gemma-b-b-ul2/special_tokens_map.json", "t5gemma-b-b-ul2/generation_config.json",
-                 "t5gemma-b-b-ul2/model.safetensors"]:
+    small = ["model_config.json"]
+    if not (a.out / "t5gemma-b-b-ul2" / "model.safetensors").exists():
+        small += ["t5gemma-b-b-ul2/config.json", "t5gemma-b-b-ul2/tokenizer.json",
+                  "t5gemma-b-b-ul2/tokenizer.model", "t5gemma-b-b-ul2/tokenizer_config.json",
+                  "t5gemma-b-b-ul2/special_tokens_map.json", "t5gemma-b-b-ul2/generation_config.json",
+                  "t5gemma-b-b-ul2/model.safetensors"]
+    for name in small:
         dst = a.out / name
         dst.parent.mkdir(parents=True, exist_ok=True)
-        want = int(requests.head(f"{REPO}/{name}", headers={"Authorization": f"Bearer {token}"},
+        want = int(requests.head(f"{repo}/{name}", headers={"Authorization": f"Bearer {token}"},
                                  allow_redirects=True, timeout=60).headers["content-length"])
         for _ in range(200):
             have = dst.stat().st_size if dst.exists() else 0
             if have >= want:
                 break
             try:
-                with get(f"{REPO}/{name}", token, have) as r, open(dst, "ab") as f:
+                with get(f"{repo}/{name}", token, have) as r, open(dst, "ab") as f:
                     for chunk in r.iter_content(CHUNK):
                         f.write(chunk)
             except requests.RequestException as e:
                 print(f"  retrying {name}: {e}", flush=True)
         print(f"{name}: {dst.stat().st_size / 1e6:.1f} MB", flush=True)
 
-    url, dst = f"{REPO}/model.safetensors", a.out / "model.safetensors"
+    url, dst = f"{repo}/model.safetensors", a.out / "model.safetensors"
     src_data, header = read_header(url, token)
     out_header, tensors, total = plan(header)
     print(f"{len(tensors)} tensors, {total / 1e9:.2f} GB bfloat16 "

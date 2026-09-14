@@ -16,7 +16,11 @@ import torch
 from safetensors.torch import load_file
 
 from dataset import Excerpts
-from stable_audio_3.inference.sampling import build_schedule, sample_flow_pingpong
+from stable_audio_3.inference.sampling import (
+    build_schedule,
+    sample_discrete_euler,
+    sample_flow_pingpong,
+)
 from train import load
 
 
@@ -75,8 +79,12 @@ def main():
         # LogSNR schedule; using the training shift here warps the whole trajectory.
         sigmas = build_schedule(a.steps, dist_shift=model.sampling_dist_shift,
                                effective_seq_len=z.shape[-1], device=dev)
+        # pingpong is for the adversarially distilled rf_denoiser objective; the
+        # base checkpoint is plain rectified flow and wants euler.
+        sampler = (sample_flow_pingpong if model.diffusion_objective == "rf_denoiser"
+                   else sample_discrete_euler)
         with torch.autocast("cuda", torch.bfloat16):
-            out = sample_flow_pingpong(model, torch.randn_like(z), sigmas, disable_tqdm=True, cond=c)
+            out = sampler(model, torch.randn_like(z), sigmas, disable_tqdm=True, cond=c)
 
         for name, latent in ((a.tag, out), ("truth", z)):
             path = a.out / f"{int(off)}s_{name}.flac"
