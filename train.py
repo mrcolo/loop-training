@@ -21,6 +21,7 @@ import bitsandbytes as bnb
 import soundfile as sf
 import torch
 import torch.nn.functional as F
+from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
@@ -143,8 +144,11 @@ def main():
     torch.cuda.empty_cache()
 
     dit = model.model.requires_grad_(True).train()
-    if a.resume:
+    start = 0
+    if a.resume:  # weights only; float32 Adam moments are 11.6 GB and not worth the disk
         dit.load_state_dict({k: v.float() for k, v in load_file(a.resume).items()})
+        with safe_open(a.resume, framework="pt") as f:
+            start = int(f.metadata()["step"])
     # float32 master weights and grads already cost 11.6 GB, so the moments go 8-bit.
     opt = bnb.optim.AdamW8bit(dit.parameters(), lr=a.lr, betas=(0.9, 0.95), weight_decay=0.01)
 
@@ -161,7 +165,7 @@ def main():
     tb.add_text("config", "\n".join(f"{k} = {v}" for k, v in vars(a).items()), 0)
     print(f"{data}; {sum(q.numel() for q in dit.parameters()) / 1e9:.2f}B trainable params", flush=True)
 
-    step, t0 = 0, time.time()
+    step, t0 = start, time.time()
     while step < a.steps:
         for audio, _ in loader:
             step += 1
