@@ -8,3 +8,7 @@ __pycache__/
 paper/*.aux
 paper/*.out
 samples/
+traindemo/
+share/
+energy_index.npz
+*.npz

@@ -28,9 +28,9 @@ def main():
     p.add_argument("--out", type=Path, default=Path("samples"))
     p.add_argument("--resume", type=Path, help="finetuned dit.safetensors; omit for the base model")
     p.add_argument("--tag", default="model")
-    p.add_argument("--prompt", default="")
-    p.add_argument("--seconds", type=float, default=24.0)
-    p.add_argument("--context", type=float, default=8.0, help="seconds of audio given as context")
+    p.add_argument("--prompt", default='TrackType: Music, VocalType: Instrumental, Genre: Electronic. Electronic dance music recorded from a live DJ set, club sound system, driving drums and synthesizer bass.')
+    p.add_argument("--seconds", type=float, default=95.0)
+    p.add_argument("--context", type=float, default=32.0, help="seconds of audio given as context")
     p.add_argument("--at", type=float, nargs="+", default=[600.0, 3600.0, 7200.0],
                    help="offsets in the source to take context from")
     p.add_argument("--steps", type=int, default=8)
