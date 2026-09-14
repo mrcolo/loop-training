@@ -4,3 +4,6 @@ runs/
 *.log
 *.flac
 __pycache__/
+.claude/
+paper/*.aux
+paper/*.out
