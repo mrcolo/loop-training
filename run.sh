@@ -4,4 +4,4 @@ set -eu
 cd /home/stem-user/loop
 until grep -q "^wrote models" fetch.log 2>/dev/null; do sleep 30; done
 exec env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-  .venv/bin/python train.py "$@"
+  .venv/bin/python -u train.py --audio /home/alessio/Desktop/2n1t3-audio.flac "$@"

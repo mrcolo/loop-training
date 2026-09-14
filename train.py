@@ -109,7 +109,7 @@ def demo(model, cond, z, steps: int, tb, step: int, out: Path, sr: int):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--audio", type=Path, default=Path("/home/alessio/Desktop/2n1t3-audio.flac"))
+    p.add_argument("--audio", type=Path, default=Path("audio.flac"))
     p.add_argument("--model", type=Path, default=Path("models/stable-audio-3-medium"))
     p.add_argument("--out", type=Path, default=Path("runs/outpaint"))
     p.add_argument("--prompt", default="")
