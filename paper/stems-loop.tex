@@ -652,7 +652,80 @@ Throughput & $4.7$\,s/step (RTX 3090) \\
 \end{table}
 
 % ==========================================================================
+\section{Results}
+\label{sec:results}
+
+We evaluate by outpainting: 32\,s of real audio is given as context and the model
+generates the following 158\,s, at the eight sampler steps the checkpoint is
+distilled for. Quality is the mean absolute difference between the generated
+region's 24-band log-spectral envelope and that of the true continuation, plus
+the ratio of generated RMS to the true continuation's RMS. Five contexts are
+drawn from widely separated points of a 26.4\,h source.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lrr}
+\toprule
+Model & Envelope dist. & Level vs.\ truth \\
+\midrule
+Pretrained            & \textbf{0.279} & 1.28$\times$ \\
+Finetuned, 2000 steps & 0.296 & 1.28$\times$ \\
+Finetuned, 6000 steps & 0.349 & 0.72$\times$ \\
+\midrule
+Blend $\alpha=0.25$   & 0.296 & 1.28$\times$ \\
+Blend $\alpha=0.50$   & 0.324 & \textbf{1.08}$\times$ \\
+\bottomrule
+\end{tabular}
+\caption{The finetune does not improve on the pretrained checkpoint. Envelope
+distance degrades monotonically as the finetuned weights are blended in.}
+\label{tab:results}
+\end{table}
+
+\subsection{A negative result, and its mechanism}
+
+The finetune systematically reduces output energy. Across five contexts the
+generated region falls to $0.55$--$0.72\times$ the true level, from early in
+training, and the effect grows with how much audio the model must invent. Three
+ablations locate the cause:
+
+\begin{enumerate}\itemsep2pt
+\item \textbf{Not dosage.} Stopping at 2000 steps instead of 6000 reduces but does
+not remove it ($1/5$ contexts beat the baseline instead of $0/5$).
+\item \textbf{Not the gates.} Freezing every 1-D parameter --- the RMSNorm gains
+and adaLN modulation vectors that globally rescale each block --- leaves the level
+ratio unchanged at $0.58\times$ against $0.59\times$. The drift originates in the
+weight matrices, so it is the velocity field itself, not a global gain.
+\item \textbf{Not recoverable by interpolation.} Blending back toward the base
+improves the level monotonically but never beats the base on envelope
+(Table~\ref{tab:results}).
+\end{enumerate}
+
+A fourth observation identifies the likely cause. The released checkpoint is
+adversarially post-trained for few-step sampling. The pretrained model degrades
+gracefully as sampler steps increase ($0.412 \to 0.577$ from 8 to 64 steps);
+the finetuned model collapses ($0.221 \to 2.908$, with output falling to
+$0.017$ RMS and the spectral centroid rising to 9.2\,kHz, i.e.\ hiss). Plain
+flow-matching MSE pulls the velocity field toward the conditional mean, which
+erodes exactly the property adversarial post-training installed. Notably,
+Stability ships a LoRA finetuning script for this model and not a full-finetune
+one.
+
+We therefore report this as a negative result: the recipe of
+\S\ref{sec:mask}--\S\ref{sec:eval} is correct with respect to the reference
+implementation, trains stably, and reduces its training objective, yet does not
+improve perceptual quality on an adversarially distilled checkpoint. Recovering
+the missing adversarial term, or restricting the update to a low-rank adapter,
+are the two obvious next steps.
+
 \section{Discussion}
+
+The headline lesson is negative and worth stating plainly: a finetune can be
+faithful to its reference implementation, train stably, and lower its loss while
+making the model worse. Our validation loss fell from 1.31 to 1.01 and the
+context-reconstruction term fell twenty-fold, over exactly the interval in which
+output energy drifted to half the source's. Any evaluation that had stopped at
+the loss curve would have reported success.
 
 The general lesson is that capability is often already latent in a pretrained checkpoint,
 distributed across a conditioning interface that was trained for a broader task than the

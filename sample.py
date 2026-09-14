@@ -28,6 +28,8 @@ def main():
     p.add_argument("--out", type=Path, default=Path("samples"))
     p.add_argument("--resume", type=Path, help="finetuned dit.safetensors; omit for the base model")
     p.add_argument("--tag", default="model")
+    p.add_argument("--alpha", type=float, default=1.0,
+                   help="blend toward the base: 0 = pretrained, 1 = fully finetuned")
     p.add_argument("--prompt", default='TrackType: Music, VocalType: Instrumental, Genre: Electronic. Electronic dance music recorded from a live DJ set, club sound system, driving drums and synthesizer bass.')
     p.add_argument("--seconds", type=float, default=95.0)
     p.add_argument("--context", type=float, default=32.0, help="seconds of audio given as context")
@@ -42,7 +44,11 @@ def main():
     cfg, model = load(a.model, dev)
     model.pretransform.to(torch.bfloat16)
     if a.resume:
-        model.model.load_state_dict({k: v.float() for k, v in load_file(a.resume).items()})
+        tuned = {k: v.float() for k, v in load_file(a.resume).items()}
+        if a.alpha != 1.0:  # WiSE-FT: keep the base model's behaviour, add a fraction of the finetune
+            base = model.model.state_dict()
+            tuned = {k: (1 - a.alpha) * base[k].float().cpu() + a.alpha * v for k, v in tuned.items()}
+        model.model.load_state_dict(tuned)
     model.eval()
 
     sr = cfg["sample_rate"]
