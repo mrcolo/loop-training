@@ -84,8 +84,8 @@ def main():
     p.add_argument("--model", type=Path, default=Path("models/stable-audio-3-medium"))
     p.add_argument("--out", type=Path, default=Path("runs/outpaint"))
     p.add_argument("--prompt", default="")
-    p.add_argument("--seconds", type=float, default=47.0)
-    p.add_argument("--steps", type=int, default=4000)
+    p.add_argument("--seconds", type=float, default=24.0)  # 258 latent frames, just over the model's 256 floor
+    p.add_argument("--steps", type=int, default=3000)
     p.add_argument("--batch", type=int, default=4)
     p.add_argument("--lr", type=float, default=1e-5)
     p.add_argument("--warmup", type=int, default=100)
