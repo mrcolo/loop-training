@@ -37,6 +37,8 @@ def main():
     p.add_argument("--alpha", type=float, default=1.0,
                    help="blend toward the base: 0 = pretrained, 1 = fully finetuned")
     p.add_argument("--prompt", default='TrackType: Music, VocalType: Instrumental, Genre: Electronic. Electronic dance music recorded from a live DJ set, club sound system, driving drums and synthesizer bass.')
+    p.add_argument("--cond-cache", type=Path, default=Path("runs/outpaint/conditioning.pt"),
+                   help="reuse a cached conditioning tensor instead of loading the text encoder")
     p.add_argument("--seconds", type=float, default=95.0)
     p.add_argument("--context", type=float, default=32.0, help="seconds of audio given as context")
     p.add_argument("--at", type=float, nargs="+", default=[600.0, 3600.0, 7200.0],
@@ -47,7 +49,8 @@ def main():
 
     dev = torch.device("cuda")
     a.out.mkdir(parents=True, exist_ok=True)
-    cfg, model = load(a.model, dev)
+    cached = a.cond_cache.exists()
+    cfg, model = load(a.model, dev, conditioner=not cached)
     model.pretransform.to(torch.bfloat16)
     if a.resume:
         delta = load_file(a.resume)  # checkpoints hold the delta, not the weights
@@ -62,7 +65,11 @@ def main():
 
     sr = cfg["sample_rate"]
     data = Excerpts([a.audio], a.seconds, sr, a.prompt)
-    cond = model.conditioner([{"prompt": a.prompt, "seconds_total": a.seconds}], dev)
+    if cached:  # the text encoder may have been reclaimed; the tensor is a constant anyway
+        cond = {k: tuple(t.to(dev) for t in v) for k, v in torch.load(a.cond_cache).items()}
+        cond = {k: tuple(t[:1] for t in v) for k, v in cond.items()}
+    else:
+        cond = model.conditioner([{"prompt": a.prompt, "seconds_total": a.seconds}], dev)
 
     for off in a.at:
         with torch.autocast("cuda", torch.bfloat16):
