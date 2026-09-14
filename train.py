@@ -57,9 +57,8 @@ def outpaint_mask(latents: torch.Tensor, p_full: float):
 
 
 @torch.no_grad()
-def demo(model, cond, latents, steps: int, tb, step: int, out: Path, sr: int):
-    """Continue the first half of the latest excerpt and log the result."""
-    z = latents[:1]
+def demo(model, cond, z, steps: int, tb, step: int, out: Path, sr: int):
+    """Continue the first half of a fixed reference excerpt and log the result."""
     mask = torch.ones_like(z[:, :1])
     mask[..., z.shape[-1] // 2:] = 0
     c = {k: tuple(t[:1] for t in v) for k, v in cond.items()}
@@ -70,7 +69,7 @@ def demo(model, cond, latents, steps: int, tb, step: int, out: Path, sr: int):
     with torch.autocast("cuda", torch.bfloat16):
         sampled = sample_flow_pingpong(model, torch.randn_like(z), sigmas, disable_tqdm=True, cond=c)
 
-    for tag, latent in (("outpaint", sampled), ("truth", z)):
+    for tag, latent in [("outpaint", sampled)] + ([("truth", z)] if step == 1 else []):
         with torch.autocast("cuda", torch.bfloat16):
             audio = model.pretransform.decode(latent.to(torch.bfloat16))
         audio = audio.float().clamp(-1, 1)[0].cpu()
@@ -92,6 +91,7 @@ def main():
     p.add_argument("--p-full", type=float, default=0.1, help="fraction of fully masked items")
     p.add_argument("--workers", type=int, default=2)
     p.add_argument("--demo-every", type=int, default=250)
+    p.add_argument("--demo-at", type=float, default=3600.0, help="offset of the reference excerpt, seconds")
     p.add_argument("--demo-steps", type=int, default=8)
     p.add_argument("--save-every", type=int, default=500)
     p.add_argument("--resume", type=Path)
@@ -120,6 +120,10 @@ def main():
     data = Excerpts([a.audio], a.seconds, sr, a.prompt, epoch=a.batch * 100)
     loader = DataLoader(data, batch_size=a.batch, collate_fn=collate, drop_last=True,
                         num_workers=a.workers, persistent_workers=a.workers > 0)
+
+    # One fixed excerpt, encoded once, so the demos are comparable step to step.
+    with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
+        ref = model.pretransform.encode(data.at(a.demo_at)[0][None].to(dev)).float()
 
     tb = SummaryWriter(a.out / "tb")
     tb.add_text("config", "\n".join(f"{k} = {v}" for k, v in vars(a).items()), 0)
@@ -168,7 +172,7 @@ def main():
                 dit.eval()
                 torch.cuda.empty_cache()
                 try:
-                    demo(model, cond, z, a.demo_steps, tb, step, a.out, sr)
+                    demo(model, cond, ref, a.demo_steps, tb, step, a.out, sr)
                 except torch.OutOfMemoryError:
                     print("demo OOM, skipped", flush=True)
                 dit.train()

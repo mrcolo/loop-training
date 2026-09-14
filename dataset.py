@@ -1,8 +1,8 @@
 """Random excerpts from audio files, decoded on demand.
 
 Nothing is pre-decoded and nothing is cached: each item seeks straight to a
-random offset and reads only the frames it needs. A long track therefore costs
-no memory, which is what lets the autoencoder stay online during training.
+random offset and reads only the frames it needs. A 26-hour source file
+therefore costs no memory, which is what lets the autoencoder stay online.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ class Excerpts(torch.utils.data.Dataset):
             the length is simply how often you want the training loop to wrap.
     """
 
-    def __init__(self, paths, seconds: float = 47.0, sample_rate: int = 44100,
+    def __init__(self, paths, seconds: float = 24.0, sample_rate: int = 44100,
                  prompt: str = "", epoch: int = 1000):
         self.tracks = []
         for path in map(Path, paths):
@@ -45,10 +45,18 @@ class Excerpts(torch.utils.data.Dataset):
 
     def __getitem__(self, _):
         path, sr, total = random.choices(self.tracks, weights=self.weights)[0]
-        want = round(self.seconds * sr)
+        return self._read(path, sr, random.randint(0, max(0, total - round(self.seconds * sr))))
+
+    def at(self, offset_seconds: float, track: int = 0):
+        """One specific excerpt, for a demo you want to compare across steps."""
+        path, sr, total = self.tracks[track]
+        start = min(round(offset_seconds * sr), max(0, total - round(self.seconds * sr)))
+        return self._read(path, sr, start)
+
+    def _read(self, path: Path, sr: int, start: int):
         with sf.SoundFile(path) as f:
-            f.seek(random.randint(0, max(0, total - want)))
-            block = f.read(want, dtype="float32", always_2d=True)
+            f.seek(start)
+            block = f.read(round(self.seconds * sr), dtype="float32", always_2d=True)
 
         audio = torch.from_numpy(block).T
         if sr != self.sample_rate:
@@ -58,7 +66,7 @@ class Excerpts(torch.utils.data.Dataset):
         return audio, {"prompt": self.prompt, "seconds_total": self.seconds}
 
     def __repr__(self) -> str:
-        return (f"Excerpts({len(self.tracks)} tracks, {sum(self.weights):.1f}s total, "
+        return (f"Excerpts({len(self.tracks)} tracks, {sum(self.weights) / 3600:.1f} h total, "
                 f"{self.seconds:.1f}s @ {self.sample_rate} Hz)")
 
 
