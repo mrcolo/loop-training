@@ -140,34 +140,46 @@ work; they cost encode time roughly linearly.
 
 ---
 
-## Result: this does not work, and why
+## Results
 
-Trained faithfully to the reference implementation, this finetune **does not improve
-the model**. Evaluated by outpainting 158 s from a 32 s seed across five contexts:
+Evaluated by outpainting 158 s from a 32 s seed, at the 8 sampler steps this
+checkpoint is distilled for, across five contexts spread over a 26.4 h source.
+Envelope distance is the mean absolute difference between the generated region's
+24-band log-spectral envelope and the true continuation's.
 
-| model | envelope distance | level vs truth |
-| --- | --- | --- |
-| pretrained | **0.279** | 1.28x |
-| finetuned, 2000 steps | 0.296 | 1.28x |
-| finetuned, 6000 steps | 0.349 | 0.72x |
+| model | mean envelope distance | level vs truth | wins |
+| --- | --- | --- | --- |
+| pretrained | 0.378 | 0.89x | — |
+| finetuned, 4000 steps | **0.364** | 0.87x | 3/5 |
 
-Output energy drifts to roughly half the source's, from early in training, and worsens
-the more the model has to generate. Three ablations locate the cause: it is not step
-count (early stopping only mitigates), not the norm gains or adaLN gates (freezing every
-1-D parameter leaves the ratio at 0.58x against 0.59x), and not recoverable by blending
-back toward the base (envelope degrades monotonically with blend weight).
+### Three defects that made this look impossible
 
-The likely cause is the fourth measurement. The released checkpoint is adversarially
-post-trained for few-step sampling. Raising sampler steps from 8 to 64 moves the
-pretrained model from 0.412 to 0.577 envelope distance, gracefully; it moves the
-finetuned model from 0.221 to 2.908, with output collapsing to 0.017 RMS and the
-centroid rising to 9.2 kHz. Plain flow-matching MSE pulls the velocity field toward the
-conditional mean, eroding what the adversarial stage installed. Stability ships a LoRA
-script for this model, not a full-finetune one, which fits.
+Getting here required fixing three things, each of which alone produced a
+convincing but false negative result.
 
-**The loss curve said the opposite.** Validation loss fell from 1.31 to 1.01 and the
-context term fell twenty-fold over exactly the window in which the audio got worse. Any
-evaluation stopping at the loss curve would have called this a success.
+**The sampler used the wrong schedule.** The model carries two distribution
+shifts: `dist_shift` for training and `sampling_dist_shift` for inference, the
+latter defaulting to a LogSNR schedule when the config omits it, as this one
+does. Their `generate()` uses the sampling one. Using the training schedule at
+inference moved the base model's output level to 1.28x the source; correcting it
+gives 0.89x.
+
+**Checkpoints quantised the finetune away.** Storing weights in bfloat16 sounds
+harmless until you compare magnitudes: mean weight 0.049, bfloat16 step at that
+magnitude 1.9e-4, and the learned update after 2000 steps at a low learning rate
+averaged 8.9e-5 — *smaller than the rounding step*. The saved file was roughly
+half signal and half noise, and random weight noise blurs a generative model,
+which shows up as quiet, over-smoothed audio. Checkpoints now store the **delta**
+from the base weights in float16; because float16 is relative-precision, small
+values survive essentially exactly at the same file size.
+
+**The learning rate was 25x too low.** 2e-6, derived by equating Adam to the Muon
+step size in the *pretraining* config. Published full finetunes of Stable Audio
+use AdamW at 5e-5, betas (0.9, 0.999), weight decay 1e-3. At 5e-5 the update is
+3.2% of weight magnitude and 2048x above the storage floor, against 0.47x before.
+
+The lesson worth keeping: validation loss fell smoothly throughout all of the
+broken configurations. It never once indicated that the saved model was noise.
 
 ## Reading the results
 

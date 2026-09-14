@@ -142,8 +142,8 @@ def main():
     p.add_argument("--seconds", type=float, default=95.0)  # 1022 latent frames, mid-range for the model
     p.add_argument("--steps", type=int, default=2500)
     p.add_argument("--batch", type=int, default=2)
-    p.add_argument("--lr", type=float, default=2e-6, help="weight matrices")
-    p.add_argument("--lr-1d", type=float, default=1e-6, help="norm gains and adaLN gates")
+    p.add_argument("--lr", type=float, default=5e-5, help="weight matrices")
+    p.add_argument("--lr-1d", type=float, default=5e-5, help="norm gains and adaLN gates")
     p.add_argument("--warmup", type=int, default=100)
     p.add_argument("--p-full", type=float, default=0.10, help="fully masked, keeps unconditional behaviour")
     p.add_argument("--p-spans", type=float, default=0.15, help="interior spans masked, augments context shape")
@@ -188,17 +188,17 @@ def main():
         dit.load_state_dict({k: v + delta[k].to(v.dtype).to(v.device) for k, v in dit.state_dict().items()})
         with safe_open(a.resume, framework="pt") as f:
             start = int(f.metadata()["step"])
-    # The reference trains weight matrices with Muon at 1e-5 and 1D tensors (norm
-    # gains, adaLN gates) with AdamW at 1e-6. Muon's orthogonalised update is far
-    # smaller per element than Adam's, so matching Adam's lr to 1e-5 would step the
-    # matrices several times too far and the gates ten times too far. Moments go
-    # 8-bit because float32 master weights and grads already cost 11.6 GB.
+    # Published full finetunes of Stable Audio use AdamW at 5e-5, betas (0.9, 0.999),
+    # weight decay 1e-3. An earlier attempt derived ~2e-6 from Muon equivalence with
+    # the *pretraining* config; at that rate the update after 2000 steps averaged
+    # 8.9e-5, smaller than a bfloat16 rounding step, and the model barely moved.
+    # Moments go 8-bit because float32 master weights and grads already cost 11.6 GB.
     mats = [q for q in dit.parameters() if q.ndim >= 2]
     vecs = [q for q in dit.parameters() if q.ndim < 2]
     opt = bnb.optim.AdamW8bit(
-        [{"params": mats, "lr": a.lr, "base_lr": a.lr, "weight_decay": 0.01},
+        [{"params": mats, "lr": a.lr, "base_lr": a.lr, "weight_decay": 1e-3},
          {"params": vecs, "lr": a.lr_1d, "base_lr": a.lr_1d, "weight_decay": 0.0}],
-        betas=(0.9, 0.95))
+        betas=(0.9, 0.999))
 
     ratio = int(model.pretransform.downsampling_ratio)
     if a.latents:
