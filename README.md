@@ -12,6 +12,11 @@ Three files do the work. No training framework, no config trees, no Lightning.
 | [`train.py`](train.py) | the finetune: online autoencoding, causal masks, rectified-flow loss |
 | [`fetch_model.py`](fetch_model.py) | downloads the checkpoint, converting float32 to bfloat16 in flight |
 | [`sample.py`](sample.py) | outpaint excerpts with a checkpoint, or with the base model for A/B |
+| [`encode_latents.py`](encode_latents.py) | encode a recording to a latent stream once |
+| [`scan_energy.py`](scan_energy.py) | index a long recording by loudness and sub-bass |
+
+Adding a large corpus? [`ENCODING_BRIEF.md`](ENCODING_BRIEF.md) covers the format,
+the scaling numbers, and the mistakes that silently corrupt latents.
 
 A write-up of the method, with figures and the full hyperparameter set, is in
 [`paper/stems-loop.pdf`](paper/stems-loop.pdf) ([source](paper/stems-loop.tex)).
