@@ -20,6 +20,7 @@ from pathlib import Path
 import bitsandbytes as bnb
 import soundfile as sf
 import torch
+import torchaudio
 import torch.nn.functional as F
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
@@ -117,8 +118,12 @@ def demo(model, cond, z, steps: int, tb, step: int, out: Path, sr: int):
         with torch.autocast("cuda", torch.bfloat16):
             audio = model.pretransform.decode(latent.to(torch.bfloat16))
         audio = audio.float().clamp(-1, 1)[0].cpu()
-        tb.add_audio(tag, audio.mean(0), step, sample_rate=sr)
-        sf.write(out / f"{tag}_{step:06d}.flac", audio.T.numpy(), sr)
+        # mp3 on disk and half-rate mono in the event file: a 380 s demo is 44 MB
+        # as flac and 67 MB as raw tensorboard audio, which a long run cannot afford.
+        sf.write(out / f"{tag}_{step:06d}.mp3", audio.T.numpy(), sr,
+                 format="MP3", subtype="MPEG_LAYER_III")
+        tb.add_audio(tag, torchaudio.functional.resample(audio.mean(0), sr, sr // 2),
+                     step, sample_rate=sr // 2)
 
 
 def main():
