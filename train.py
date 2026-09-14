@@ -38,13 +38,21 @@ from stable_audio_3.loading_utils import load_diffusion_cond
 from stable_audio_3.models.inpainting import random_inpaint_mask
 
 
-def load(model_dir: Path, device):
-    """Build the model with the text encoder pointed at the local weights."""
+def load(model_dir: Path, device, conditioner: bool = True):
+    """Build the model with the text encoder pointed at the local weights.
+
+    `conditioner=False` builds it without the text encoder at all, for runs that
+    reuse a cached conditioning tensor. The prompt and duration are constant for
+    a run, so the tensor is too, and skipping it saves 1.2 GB on disk and in memory.
+    """
     cfg = json.loads((model_dir / "model_config.json").read_text())
     for c in cfg["model"]["conditioning"]["configs"]:
         if c["type"] == "t5gemma":
             c["config"] = {k: v for k, v in c["config"].items() if k not in ("repo_id", "subfolder")}
             c["config"]["model_path"] = str(model_dir / "t5gemma-b-b-ul2")
+    if not conditioner:
+        cfg = json.loads(json.dumps(cfg))
+        cfg["model"]["conditioning"]["configs"] = []
     return cfg, load_diffusion_cond(cfg, str(model_dir / "model.safetensors"), device=device)
 
 
@@ -160,6 +168,8 @@ def main():
     p.add_argument("--demo-every", type=int, default=250)
     p.add_argument("--demo-at", type=float, default=7200.0, help="offset of the reference excerpt, seconds")
     p.add_argument("--demo-steps", type=int, default=8)
+    p.add_argument("--demo-alpha", type=float, default=0.25,
+                   help="update strength used for demos; full strength is not what we ship")
     p.add_argument("--save-every", type=int, default=500)
     p.add_argument("--resume", type=Path)
     a = p.parse_args()
@@ -168,14 +178,20 @@ def main():
     torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = True
     a.out.mkdir(parents=True, exist_ok=True)
 
-    cfg, model = load(a.model, dev)
+    cache = a.out / "conditioning.pt"
+    cfg, model = load(a.model, dev, conditioner=not cache.exists())
     sr = cfg["sample_rate"]
     model.pretransform.to(torch.bfloat16)  # frozen, and 0.85B params is 1.7 GB saved
 
-    # One prompt and one length for the whole run: encode the text once, then let it go.
-    with torch.no_grad():
-        cond = model.conditioner([{"prompt": a.prompt, "seconds_total": a.seconds}] * a.batch, dev)
-    del model.conditioner
+    # One prompt and one length for the whole run, so the conditioning is a constant.
+    if cache.exists():
+        cond = {k: tuple(t.to(dev) for t in v) for k, v in torch.load(cache).items()}
+    else:
+        with torch.no_grad():
+            cond = model.conditioner([{"prompt": a.prompt, "seconds_total": a.seconds}] * a.batch, dev)
+        a.out.mkdir(parents=True, exist_ok=True)
+        torch.save({k: tuple(t.cpu() for t in v) for k, v in cond.items()}, cache)
+        del model.conditioner
     torch.cuda.empty_cache()
 
     dit = model.model.requires_grad_(True).train()
@@ -283,7 +299,13 @@ def main():
                 dit.eval()
                 torch.cuda.empty_cache()
                 try:
+                    if a.demo_alpha != 1.0:  # show the strength we would actually ship
+                        live = {k: v.detach().clone() for k, v in dit.state_dict().items()}
+                        dit.load_state_dict({k: base[k].to(v.device) + a.demo_alpha * (v - base[k].to(v.device))
+                                             for k, v in live.items()})
                     demo(model, cond, ref, a.demo_steps, tb, step, a.out, sr)
+                    if a.demo_alpha != 1.0:
+                        dit.load_state_dict(live)
                 except torch.OutOfMemoryError:
                     print("demo OOM, skipped", flush=True)
                 dit.train()

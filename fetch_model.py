@@ -123,7 +123,7 @@ def main():
         stream.decode_content = True
         for name, src_a, src_b, _, _, cast in tensors[first:]:
             buf = read_exact(stream, src_b - src_a)
-            if cast:
+            if cast and buf:  # some tensors are empty; frombuffer rejects those
                 buf = torch.frombuffer(bytearray(buf), dtype=torch.float32).to(
                     torch.bfloat16).view(torch.int16).numpy().tobytes()
             f.write(buf)
