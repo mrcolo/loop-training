@@ -62,6 +62,25 @@ validation loss fell the whole way, because the model was getting better at the 
 it was given. No scalar in the training log can see this. [`DIAGNOSIS.md`](DIAGNOSIS.md)
 has the full account.
 
+**The transplant is measured, not assumed.** Their advice is written for LoRA
+adapters, which are small by construction, and a full finetune is not: after 1000
+steps our update is already 0.85x the size of the entire post-training offset.
+So `probe_transplant.py` streams the post-trained weights from the Hub, adds our
+delta, and reruns the diagnostic. At 3000 steps:
+
+| | t=0.95 | t=0.9 | t=0.6 |
+| --- | --- | --- | --- |
+| base | 0.535 / 0.533 | 0.605 / 0.605 | 0.869 / 0.873 |
+| base + delta | 0.578 / 0.558 | 0.639 / 0.626 | 0.879 / 0.877 |
+| post-trained | 0.920 / 0.393 | 0.937 / 0.483 | 0.999 / 0.842 |
+| **post-trained + delta** | **0.965 / 0.408** | 0.952 / 0.506 | 0.995 / 0.849 |
+
+Amplitude over correlation. The base model sits on the conditional-mean line and
+stays there, which is correct. The post-trained model separates, and keeps
+separating after the delta is added. Few-step sampling survives intact, and the
+correlation rises, so the finetune's knowledge transfers rather than merely
+surviving.
+
 Stability's own trainer refuses the post-trained checkpoint outright:
 
 ```python

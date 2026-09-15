@@ -1,16 +1,11 @@
-#!/usr/bin/env bash
-# Wait for the latent stream, then start the long finetune under the supervisor.
-set -u
+#!/bin/bash
+# Run the pending evaluations, then hand the card back to training and keep it
+# there. Nothing in here needs a human between steps.
 cd /home/stem-user/loop
-until grep -q "^wrote latents.npy" encode.log 2>/dev/null; do
-  if ! pgrep -f encode_latents.py >/dev/null; then
-    echo "CHAIN: encoder died before finishing; aborting"; exit 1
-  fi
-  sleep 60
-done
-echo "CHAIN: latents ready at $(date -Is), starting training"
-rm -f train.log; rm -rf runs/outpaint
-HOURS=7 ./supervise.sh \
-  --audio /home/alessio/Desktop/2n1t3-audio.flac --latents latents.npy \
-  --seconds 190 --batch 1 --steps 16000 \
-  --save-every 1000 --demo-every 2000 --demo-at 7289.25
+# Match the python process only. A shell whose own command line mentions the
+# script -- including the one polling for it -- otherwise matches forever.
+while pgrep -f "python.*probe_transplant\.py" > /dev/null; do sleep 30; done
+echo "=== $(date -Is) transplant probe done, running the evaluation"
+.venv/bin/python -u evaluate.py --write > eval.log 2>&1
+echo "=== $(date -Is) evaluation exit $?, resuming training"
+exec ./supervise.sh

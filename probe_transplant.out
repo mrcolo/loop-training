@@ -1,0 +1,24 @@
+No module named 'flash_attn'
+flash_attn not installed, disabling Flash Attention
+No module named 'flash_attn'
+flash_attn varlen/bert_padding not available, disabling varlen attention
+/home/stem-user/loop/.venv/lib/python3.12/site-packages/torch/nn/utils/weight_norm.py:144: FutureWarning: `torch.nn.utils.weight_norm` is deprecated in favor of `torch.nn.utils.parametrizations.weight_norm`.
+  WeightNorm.apply(module, name, dim)
+Key conditioner.conditioners.prompt.padding_embedding not found in target state_dict or shape mismatch. Skipping.
+Key conditioner.conditioners.seconds_total.embedder.embedding.1.bias not found in target state_dict or shape mismatch. Skipping.
+Key conditioner.conditioners.seconds_total.embedder.embedding.1.weight not found in target state_dict or shape mismatch. Skipping.
+/home/stem-user/loop/probe_transplant.py:83: UserWarning: The given NumPy array is not writable, and PyTorch does not support non-writable tensors. This means writing to this tensor will result in undefined behavior. You may want to copy the array to protect its data or make it writable before converting it to a tensor. This type of warning will be suppressed for the rest of this program. (Triggered internally at /pytorch/torch/csrc/utils/tensor_numpy.cpp:213.)
+  z = torch.from_numpy(np.asarray(arr)).float()[None].to(dev)
+streaming the post-trained transformer from the Hub
+   0.0%
+   0.0%
+
+                                t=0.95          t=0.9           t=0.8           t=0.6           t=0.4           t=0.2         
+base                            0.535/0.533    0.605/0.605    0.735/0.740    0.869/0.873    0.943/0.943    0.983/0.983  
+post-trained                    0.920/0.393    0.937/0.483    0.971/0.658    0.999/0.842    1.002/0.933    0.999/0.982  
+post-trained + delta            0.965/0.408    0.952/0.506    0.967/0.681    0.995/0.849    0.999/0.935    0.998/0.982  
+base + delta (what we train)    0.578/0.558    0.639/0.626    0.757/0.753    0.879/0.877    0.945/0.944    0.984/0.983  
+
+Each cell is amplitude / correlation. They coincide for a conditional-mean
+predictor and separate for a sample predictor. The transplant is safe if
+`post-trained + delta` keeps amplitude well above correlation at t=0.95.

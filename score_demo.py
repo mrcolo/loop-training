@@ -69,7 +69,15 @@ def main():
     steps = sorted(s for (tag, s) in clips if tag == "outpaint")
     print(f"reference: {len(t_wav) / sr:.0f} s, {a.context:.0f} s context, "
           f"true continuation RMS {t_rms:.4f}\n")
-    print(f"{'step':>7}  {'envelope':>9}  {'level':>7}  {'centroid':>9}")
+    # Distance to the seed's own envelope. Matching the *specific* true
+    # continuation is partly luck over 160 s; matching the character of the
+    # audio it was handed is the thing outpainting is actually asked to do,
+    # and it does not depend on which continuation the source happened to have.
+    c_env = mel_envelope(t_wav[:cut], sr)
+    c_rms = np.sqrt((t_wav[:cut] ** 2).mean())
+    print(f"true continuation vs its own seed: envelope {np.abs(t_env - c_env).mean():.4f}, "
+          f"level {t_rms / c_rms:.2f}x  <- the floor either column can reach\n")
+    print(f"{'step':>7}  {'vs truth':>9}  {'vs seed':>8}  {'level':>7}  {'centroid':>9}")
     for s in steps:
         wav, _ = clips[("outpaint", s)]
         gen = wav[cut:]
@@ -82,7 +90,7 @@ def main():
         cen = ((S * f).sum(1) / (S.sum(1) + 1e-9)).mean()
         rms = np.sqrt((gen ** 2).mean())
         label = "  (untrained base)" if s <= 1 else ""
-        print(f"{s:7d}  {np.abs(env - t_env).mean():9.4f}  "
+        print(f"{s:7d}  {np.abs(env - t_env).mean():9.4f}  {np.abs(env - c_env).mean():8.4f}  "
               f"{rms / t_rms:6.2f}x  {cen:8.0f} Hz{label}")
 
 

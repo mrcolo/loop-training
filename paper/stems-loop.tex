@@ -333,6 +333,53 @@ that delta to \textsc{Released} at inference. The same rule is established in
 images: a distilled model is ``impossible to train on directly because every step
 you train breaks down the compression more and more''.
 
+
+\subsection{The delta transplants}
+\label{sec:transplant}
+
+Training \textsc{Base} is only useful if the result can be moved onto
+\textsc{Released}, and the guidance that says it can is written for low-rank
+adapters, which are small by construction. A full finetune is not. Fetching one
+transformer layer of \textsc{Released} by byte range and comparing it with
+\textsc{Base} puts a number on the margin: adversarial post-training moved that
+layer's weights by $1.38\%$ on median, and after 1000 steps our update is already
+$0.85\times$ that, with two tensors past it. The question is therefore empirical.
+
+Table~\ref{tab:transplant} answers it with the same diagnostic, run on four
+models under identical noise. \textsc{Base} sits exactly on the conditional-mean
+line, $0.535$ against $0.533$, and stays there once our delta is added, which is
+correct: that is the objective it was trained with. \textsc{Released} separates
+sharply, and \emph{keeps separating after the delta is added}: $0.965$ against
+$0.408$, against $0.920$ and $0.393$ for the untouched weights. The few-step
+behaviour is intact. Its correlation with the truth also rises, so the finetune's
+knowledge of the target domain transfers into the accelerated model rather than
+merely surviving in it.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+& $t{=}0.95$ & $t{=}0.9$ & $t{=}0.8$ & $t{=}0.6$ \\
+\midrule
+\textsc{Base}              & 0.535/0.533 & 0.605/0.605 & 0.735/0.740 & 0.869/0.873 \\
+\textsc{Base} $+\,\Delta$  & 0.578/0.558 & 0.639/0.626 & 0.757/0.753 & 0.879/0.877 \\
+\textsc{Released}          & 0.920/0.393 & 0.937/0.483 & 0.971/0.658 & 0.999/0.842 \\
+\textbf{\textsc{Released} $+\,\Delta$} & \textbf{0.965/0.408} & 0.952/0.506 & 0.967/0.681 & 0.995/0.849 \\
+\bottomrule
+\end{tabular}
+\caption{Amplitude / correlation of the one-step estimate, at 3000 finetuning
+steps. Equal entries denote a conditional-mean predictor. The transplanted model
+retains the separation that few-step sampling depends on.}
+\label{tab:transplant}
+\end{table}
+
+The practical consequence is that the two checkpoints divide labour cleanly:
+\textsc{Base} is what the objective is valid against, \textsc{Released} is what
+inference runs on, and the finetune is transported between them as a float16
+delta. Nothing about the recipe needs to change to get both.
+
+% ==========================================================================
 \section{Method}
 
 \subsection{Outpainting as a restriction of pretrained masking}
