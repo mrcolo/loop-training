@@ -301,6 +301,34 @@ one duration would freeze that pathway.
 
 ---
 
+## Shipping
+
+Training produces a delta from the base transformer. `ship.py` adds it to the
+post-trained transformer and writes one file you can sample in eight steps:
+
+```bash
+python ship.py --resume runs/base/dit.safetensors \
+               --drop-base models/stable-audio-3-medium-base/dit_base.safetensors
+
+python sample.py --audio YOUR.flac \
+                 --dit models/stable-audio-3-medium/dit_shipped.safetensors \
+                 --objective rf_denoiser --steps 8 --cfg 1.0 \
+                 --context 30 --seconds 190
+```
+
+The post-trained transformer is streamed from the Hub and merged in memory, so
+no intermediate copy is written. `--drop-base` removes the base transformer
+first, which is usually the only way the result fits on a full disk; it is safe
+once training has finished, since the delta is all that is needed from then on.
+`--alpha` scales the delta if you want something between the two models.
+
+**Check the margin before you ship.** `delta_margin.py` fetches a single
+transformer layer of the post-trained checkpoint by byte range, about 100 MB,
+and reports how large the finetune's update is next to the post-training offset.
+It was 0.85x at step 1000 and 1.46x at step 4000, growing roughly as the square
+root of steps. The transplant was verified intact at 1.3x; re-run
+`probe_transplant.py` before shipping if the margin has grown much beyond that.
+
 ## Resuming
 
 ```bash
