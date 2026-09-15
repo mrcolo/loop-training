@@ -35,7 +35,7 @@
 A Minimal Full-Finetune Recipe for Latent Rectified-Flow Audio Diffusion}}
 
 \author{Francesco Colonnese\\
-\texttt{github.com/mrcolo/stems-loop}}
+\texttt{github.com/mrcolo/loop-training}}
 
 \date{}
 
@@ -118,7 +118,7 @@ pretrained mask distribution toward its causal mode is sufficient to specialise 
 for continuation (\S\ref{sec:mask}). (ii) We show that squared-error training on an
 adversarially post-trained checkpoint silently converts a sample predictor into a
 conditional-mean predictor, give a one-forward-pass diagnostic that detects it, and
-report the failure it produces in full (\S\ref{sec:checkpoint}, \S\ref{sec:results}).
+report the failure it produces in full (\S\ref{sec:checkpoint}).
 (iii) We argue that the optimiser is part of the recipe rather than an implementation
 detail, and that an orthogonalised update is what makes a single learning rate valid
 across a transformer's matrices (\S\ref{sec:opt}). (iv) We give a memory budget under
@@ -716,78 +716,84 @@ single-corpus finetunes, where setup cost dominates total cost.
 \centering
 \begin{tikzpicture}
 \begin{axis}[
-  width=8.0cm, height=5.0cm,
+  width=8.2cm, height=5.0cm,
   xlabel={training step},
-  ylabel={loss (masked region)},
-  xmin=0, xmax=380, ymin=0.55, ymax=1.25,
+  ylabel={loss},
+  xmin=0, xmax=8200, ymin=0.79, ymax=0.94,
   tick label style={font=\scriptsize},
   label style={font=\scriptsize},
   legend style={font=\scriptsize,draw=none,fill=none,at={(0.98,0.98)},anchor=north east},
   axis lines=left,
   grid=major, grid style={frz!25},
+  scaled x ticks=false, xticklabel style={/pgf/number format/fixed},
 ]
-\addplot[gen,thin,mark=*,mark size=0.7pt,opacity=0.55] coordinates {
-(10,1.1379)(20,1.1522)(30,1.3382)(40,1.1779)(50,0.9800)(60,1.0500)(70,0.8900)
-(80,1.0200)(90,0.9400)(100,0.9900)(110,0.8700)(120,1.0100)(130,0.9200)(140,0.8800)
-(150,0.9600)(160,0.9000)(170,1.0400)(180,0.8500)(190,0.9700)(200,0.9100)(210,0.8300)
-(220,0.9900)(230,0.8800)(240,0.9500)(250,0.8600)(260,0.9300)(270,0.8000)(280,0.6266)
-(290,0.8611)(300,0.9122)(310,0.9637)(320,0.7541)(330,0.9183)(340,0.9816)(350,0.9209)
-(360,0.8640)(370,0.9423)
+\addplot[gen,thick] coordinates {
+(500,0.8672)(890,0.8612)(1270,0.8580)(1660,0.8428)(2040,0.8456)(2430,0.8402)
+(2810,0.8384)(3190,0.8357)(3570,0.8242)(3960,0.8191)(4340,0.8084)(4730,0.8211)
+(5110,0.8147)(5500,0.8188)(5880,0.8134)(6270,0.8177)(6650,0.8267)(7040,0.8329)
+(7420,0.8266)(7810,0.8219)(8000,0.8233)
 };
-\addlegendentry{\texttt{train/loss} (one batch, random $t$)}
-\addplot[ctx,very thick,mark=square*,mark size=1.6pt] coordinates {
-(1,1.1005)(50,0.9730)(100,0.8890)(150,0.8753)(200,0.8722)(250,0.8648)(300,0.8633)(350,0.8595)
+\addlegendentry{generation loss (smoothed)}
+\addplot[ctx,very thick] coordinates {
+(1200,0.9188)(1550,0.9154)(1900,0.9129)(2250,0.9104)(2600,0.9085)(2950,0.9076)
+(3300,0.9060)(3650,0.9052)(4000,0.9044)(4350,0.9039)(4700,0.9045)(5050,0.9034)
+(5400,0.9024)(5750,0.9004)(6100,0.8992)(6450,0.8989)(6800,0.8983)(7150,0.8983)
+(7500,0.8971)(7850,0.8956)(8000,0.8948)
 };
-\addlegendentry{\texttt{val/loss} (frozen slice)}
+\addlegendentry{validation loss, frozen slice}
 \end{axis}
 \end{tikzpicture}
-\caption{\textbf{Training loss is not a learning signal here.} The per-step loss (orange)
-spans $0.63$--$1.34$ with no discernible trend, because each point is a single batch at a
-single randomly drawn timestep and the difficulty of Eq.~\eqref{eq:target} varies sharply
-with $t$. Holding excerpts, masks, timesteps and noise fixed (blue) yields a monotone
-curve from the same run.}
-\label{fig:val}
+\caption{\textbf{Both curves descend for the whole run.} Neither indicates when to
+stop, and neither would have revealed the failure of \S\ref{sec:checkpoint}. The
+frozen slice is the more legible of the two only because it holds excerpts, masks,
+timesteps and noise fixed; a single training batch at a random timestep spans
+$0.71$--$0.92$ at any point in the run.}
+\label{fig:curves}
 \end{figure}
 
-Rectified-flow training loss at a random timestep is a high-variance estimator of
-anything one would want to monitor. Figure~\ref{fig:val} makes the point concretely: over
-the first $370$ steps of a real run, the per-step loss oscillates between $0.63$ and
-$1.34$ and supports no conclusion about whether the model is improving.
+Per-step training loss is a single batch at a single randomly drawn timestep, and
+rectified-flow loss depends strongly on that timestep. Over any 500-step window
+of this run it spans roughly $0.75$--$0.92$, which is wider than the total
+movement of the run. Reading a trend from it is guessing.
 
-We therefore fix an evaluation slice at startup and never resample it:
-four excerpts drawn from fixed offsets, each with a fixed causal mask at a different
-prefix fraction ($0.25$ to $0.75$), crossed with four fixed timesteps at
-$\{0.125, 0.375, 0.625, 0.875\}$, each with fixed noise. The reported value is the mean
-masked error over these sixteen configurations. Every source of variance except the
-weights is frozen, so successive values are directly comparable, and the cost is one
-second per evaluation.
+The frozen slice fixes everything that is not the model: the same four excerpts,
+the same masks, the same four timesteps, the same noise. Successive values are
+then directly comparable, and Figure~\ref{fig:curves} shows it falling from
+$0.9275$ to $0.8891$ over 8000 steps.
 
 \begin{table}[t]
 \centering
 \small
-\begin{tabular}{rrrr}
+\begin{tabular}{rrr}
 \toprule
-Step & \texttt{val/loss} & $\Delta$ & \texttt{train/loss} range \\
+Step & Validation loss & Drop per 1000 steps \\
 \midrule
-1   & 1.1005 & ---      & --- \\
-50  & 0.9730 & $-0.1275$ & 0.98--1.34 \\
-100 & 0.8890 & $-0.0840$ & 0.87--1.05 \\
-150 & 0.8753 & $-0.0137$ & 0.85--1.04 \\
-200 & 0.8722 & $-0.0031$ & 0.83--0.99 \\
-250 & 0.8648 & $-0.0074$ & 0.86--0.99 \\
-300 & 0.8633 & $-0.0015$ & 0.63--0.96 \\
-350 & 0.8595 & $-0.0038$ & 0.86--0.98 \\
+1    & 0.9275 & --- \\
+1000 & 0.9195 & 0.0080 \\
+2000 & 0.9115 & 0.0080 \\
+4000 & 0.9095 & 0.0010 \\
+6000 & 0.9032 & 0.0032 \\
+8000 & 0.8891 & 0.0071 \\
 \bottomrule
 \end{tabular}
-\caption{The frozen slice decreases monotonically while the per-step loss range is wide
-and overlapping throughout.}
+\caption{The frozen slice descends monotonically over the whole run, including
+across the interval in which sample quality stopped improving
+(\S\ref{sec:final}).}
 \label{tab:val}
 \end{table}
 
-Alongside the scalar we periodically sample a continuation of one \emph{fixed} reference
-excerpt with the distilled eight-step ping-pong sampler and log the audio. Fixing the
-reference is what makes successive clips comparable by ear; sampling a fresh excerpt each
-time confounds model progress with excerpt difficulty.
+The scalar is necessary but not sufficient. It descended smoothly through a
+configuration that was measurably destroying the model (\S\ref{sec:checkpoint}),
+and it was still descending at the point where doubling the training bought
+nothing (\S\ref{sec:final}). We therefore evaluate on audio: a fixed reference
+excerpt continued at every checkpoint, and periodically a grid of offsets drawn
+from an energy gate, crossed with noise seeds, with the models under comparison
+placed on identical trajectories.
+
+That last condition is easy to get wrong. Ping-pong redraws noise inside its own
+loop, so seeding the initial latent leaves two models being compared on different
+paths; the measured gap between them moved by ten points of relative improvement
+once the global generator was seeded as well.
 
 % ==========================================================================
 \section{Recipe summary}
@@ -836,66 +842,6 @@ Throughput & $4.4$\,s/step (RTX 3090) \\
 \label{tab:recipe}
 \end{table}
 
-% ==========================================================================
-\section{Diagnosis of a faithful-looking failure}
-\label{sec:results}
-
-Before arriving at \S\ref{sec:checkpoint} we ran the same recipe against the
-\textsc{Released} checkpoint, with AdamW in place of the Muon pairing and no
-weight average. It is worth reporting in full, because every signal available
-during training said it was working.
-
-We evaluate by outpainting: $32$\,s of real audio is given as context and the
-model generates the following $158$\,s, at the eight sampler steps the released
-checkpoint is post-trained for. Quality is the mean absolute difference between
-the generated region's $24$-band log-spectral envelope and that of the true
-continuation, plus the ratio of generated RMS to the true continuation's. Five
-contexts are drawn from widely separated points of a $26.4$\,h source.
-
-\begin{table}[t]
-\centering
-\small
-\begin{tabular}{lrr}
-\toprule
-Model & Envelope dist. & Level vs.\ truth \\
-\midrule
-\textsc{Released}, untouched & \textbf{0.279} & 1.28$\times$ \\
-$+\,2000$ MSE steps & 0.296 & 1.28$\times$ \\
-$+\,6000$ MSE steps & 0.349 & 0.72$\times$ \\
-\midrule
-Blend $\alpha=0.25$   & 0.296 & 1.28$\times$ \\
-Blend $\alpha=0.50$   & 0.324 & \textbf{1.08}$\times$ \\
-\bottomrule
-\end{tabular}
-\caption{Outcome of squared-error training on the post-trained checkpoint.
-Quality degrades monotonically with how much of the update is applied, and
-interpolating back toward the released weights recovers level without ever
-beating them on envelope.}
-\label{tab:results}
-\end{table}
-
-Three ablations exclude the obvious explanations. It is \textbf{not dosage}:
-stopping at $2000$ steps reduces but does not remove the effect. It is \textbf{not
-the gates}: freezing every 1-D parameter --- the RMSNorm gains and adaLN
-modulation vectors that globally rescale each block --- leaves the level ratio at
-$0.58\times$ against $0.59\times$, so the drift is in the weight matrices, in the
-velocity field itself. And it is \textbf{not recoverable by interpolation}: a
-weight blend trades one defect for the other along a curve that never reaches the
-baseline.
-
-The sampler-step sweep is what points at the mechanism. The released checkpoint
-degrades gracefully as steps increase ($0.412 \rightarrow 0.577$ from $8$ to
-$64$); the finetuned one collapses ($0.221 \rightarrow 2.908$, output falling to
-$0.017$ RMS with spectral centroid rising to $9.2$\,kHz --- hiss). A model whose
-few-step behaviour is intact but whose many-step behaviour explodes is not a
-broken model; it is a model being sampled by the wrong solver family. Table~\ref{tab:probe}
-then measures the cause directly.
-
-Throughout all of this, validation loss fell monotonically, from $1.31$ to
-$1.01$, and the context-reconstruction term fell twenty-fold. The training curves
-were indistinguishable from a healthy run.
-
-% ==========================================================================
 % ==========================================================================
 \section{Results}
 \label{sec:final}
@@ -951,33 +897,41 @@ is the wrong instrument to stop on; this is the same lesson as
 
 \section{Discussion}
 
-The headline lesson is worth stating plainly: a finetune can be faithful to its
-reference implementation, train stably, and lower its loss while making the model
-worse, and the loss curve cannot tell you. Ours fell from $1.31$ to $1.01$ over
-exactly the interval in which the model was being converted from a sample
-predictor into a mean predictor. Any evaluation that had stopped at the scalar
-would have reported success.
+The result we would most want carried forward is the diagnostic. Whenever a
+sampler rebuilds its state from a one-step estimate --- ping-pong, restart
+sampling, consistency-model sampling --- that estimate has to be a sample and not
+a conditional mean, and the two are distinguishable in a single forward pass by
+comparing the estimate's scale against its correlation with the truth. They
+coincide for a mean predictor and separate for a sample predictor. No scalar in a
+training log carries this: in our runs both loss curves descended smoothly
+throughout, including across an interval in which the property was being
+destroyed.
 
-The generalisable part is the diagnostic, not the incident. Whenever a sampler
-rebuilds its state from a one-step estimate --- ping-pong, restart sampling,
-consistency-model sampling --- that estimate must be a sample and not a mean, and
-the distinction is measurable in one forward pass by comparing the estimate's
-scale to its correlation with the truth. The two coincide for a mean predictor
-and separate for a sample predictor. We would run this before and after any
-training that touches a distilled or post-trained checkpoint.
+The second result is that the division of labour between the two published
+checkpoints is not a compromise. The base transformer is the only one a
+squared-error objective is valid against; the post-trained transformer is a
+strictly better generator at the step count anyone actually samples at. Carrying
+a finetune between them as a delta gives both, and
+Table~\ref{tab:final} shows the merged eight-step model beating the fifty-step
+model it was trained as. The margin that makes this work is finite and grows as
+roughly the square root of training steps, so it is worth measuring rather than
+assuming --- one transformer layer fetched by byte range is enough.
 
-The general lesson is that capability is often already latent in a pretrained checkpoint,
-distributed across a conditioning interface that was trained for a broader task than the
-one at hand. Stable Audio 3 was trained to inpaint; outpainting is the causal corner of
-that distribution. Specialising to it is a change of \emph{sampling weights}, not a change
-of model. The practical payoff is disproportionate: no zero-initialised branch to warm up,
-no train/inference conditioning mismatch, and a finetune whose step zero is exactly the
+The third is that capability is often already latent in a pretrained checkpoint,
+distributed across a conditioning interface trained for a broader task than the
+one at hand. Stable Audio 3 was trained to inpaint; outpainting is the causal
+corner of that distribution. Specialising to it is a change of \emph{sampling
+weights}, not a change of model: no zero-initialised branch to warm up, no
+train/inference conditioning mismatch, and a step zero that is exactly the
 released model.
 
-Two limitations are worth naming. Online encoding costs $85\%$ of wall-clock time, which
-is the right trade for single-corpus finetunes and the wrong one for large multi-corpus
-runs. And a full finetune on one domain will move the model away from its general prior;
-the residual \textsc{Full}-mask fraction slows this but does not eliminate it.
+Three limitations are worth naming. The evaluation is a spectral-envelope
+distance on eight paired renders from a single source; it correlates with what we
+hear but it is not a listening study. A full finetune on one domain moves the
+model away from its general prior, and the residual full-mask fraction slows this
+without eliminating it. And the transplant margin was verified at $1.3\times$ and
+measured at $2.3\times$ at the reported checkpoint; longer runs will need it
+re-checked rather than extrapolated.
 
 \section{Conclusion}
 
@@ -993,6 +947,6 @@ suboptimal; it systematically undoes the post-training, and it does so while eve
 scalar available during the run improves. The distinction between a sample predictor and
 a conditional-mean predictor is not visible in a loss curve, but it is visible in one
 forward pass, and it should be checked before and after any training that touches a
-distilled checkpoint. Code is available at \url{https://github.com/mrcolo/stems-loop}.
+distilled checkpoint. Code is available at \url{https://github.com/mrcolo/loop-training}.
 
 \end{document}

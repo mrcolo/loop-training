@@ -174,7 +174,7 @@ uniform fraction of the window. Two deliberate changes:
 Requires a CUDA GPU with 24 GB and Python 3.12.
 
 ```bash
-git clone https://github.com/mrcolo/stems-loop
+git clone https://github.com/mrcolo/loop-training
 cd stems-loop
 uv venv --python 3.12
 uv pip install torch torchaudio --torch-backend=auto
