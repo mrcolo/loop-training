@@ -21,7 +21,7 @@ from stable_audio_3.inference.sampling import (
     sample_discrete_euler,
     sample_flow_pingpong,
 )
-from train import load
+from train import build_number_conditioner, load
 
 
 @torch.no_grad()
@@ -40,8 +40,9 @@ def main():
     p.add_argument("--alpha", type=float, default=1.0,
                    help="blend toward the base: 0 = pretrained, 1 = fully finetuned")
     p.add_argument("--prompt", default='TrackType: Music, VocalType: Instrumental, Genre: Electronic. Electronic dance music recorded from a live DJ set, club sound system, driving drums and synthesizer bass.')
-    p.add_argument("--cond-cache", type=Path, default=Path("runs/outpaint/conditioning.pt"),
-                   help="reuse a cached conditioning tensor instead of loading the text encoder")
+    p.add_argument("--cond-cache", type=Path, default=Path("runs/base/prompt_cond.pt"),
+                   help="cached prompt embedding; the text encoder is 1.2 GB and the "
+                        "prompt is constant for a run, so it is usually not on disk")
     p.add_argument("--seconds", type=float, default=95.0)
     p.add_argument("--context", type=float, default=32.0, help="seconds of audio given as context")
     p.add_argument("--at", type=float, nargs="+", default=[600.0, 3600.0, 7200.0],
@@ -73,8 +74,10 @@ def main():
     sr = cfg["sample_rate"]
     data = Excerpts([a.audio], a.seconds, sr, a.prompt)
     if cached:  # the text encoder may have been reclaimed; the tensor is a constant anyway
-        cond = {k: tuple(t.to(dev) for t in v) for k, v in torch.load(a.cond_cache).items()}
-        cond = {k: tuple(t[:1] for t in v) for k, v in cond.items()}
+        prompt = tuple(t.to(dev) for t in torch.load(a.cond_cache))
+        number = build_number_conditioner(a.model, dev)
+        cond = {"prompt": tuple(t[:1] for t in prompt),
+                "seconds_total": number([{"seconds_total": a.seconds}], dev)["seconds_total"]}
     else:
         cond = model.conditioner([{"prompt": a.prompt, "seconds_total": a.seconds}], dev)
 
@@ -87,6 +90,8 @@ def main():
 
         c = dict(cond)
         c["inpaint_mask"], c["inpaint_masked_input"] = [mask], [z * mask]
+        # Ping-pong redraws noise inside its loop from the global generator, so the
+        # seed has to be set here as well for two models to be comparable.
         torch.manual_seed(a.seed)
         # Inference uses sampling_dist_shift, not the training-time dist_shift.
         # They are different objects and the model defaults the sampling one to a

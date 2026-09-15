@@ -255,6 +255,47 @@ length freezes that pathway; the run samples 47, 95, 190 and 380 s.
 
 ---
 
+## Results
+
+Trained 8000 steps on 26.4 h of one DJ set, then merged onto the post-trained
+weights. Evaluated by outpainting 160 s from a 30 s seed at four offsets drawn
+from the energy gate, two seeds each, **both models on identical trajectories**.
+
+| model | sampler | distance to real continuation | level | level spread |
+| --- | --- | --- | --- | --- |
+| stock, base weights | 50 steps | 0.5547 | 1.10x | 0.11 |
+| this finetune, base weights | 50 steps | 0.3817 | 1.15x | 0.16 |
+| stock, post-trained | 8 steps | 0.4537 | 1.03x | 0.24 |
+| **this finetune, merged** | **8 steps** | **0.2978** | 1.11x | **0.09** |
+| the real recording | — | — | 1.04x | 0.33 |
+
+**34% closer than stock at the same 8-step cost, winning 7 of 8 paired renders.**
+It also beats its own 50-step base version, 0.2978 against 0.3817, because the
+post-trained weights are simply better at few-step sampling than base weights are
+at many-step sampling.
+
+The consistency column matters as much as the mean. Stock produced one render at
+0.47x level, a near-collapse; this model's worst is 0.96x, and its spread is a
+third of stock's. It is not only closer on average, it fails less.
+
+The denoiser probe on the merged file, with 30 s of context at t=0.95:
+
+| | stock | merged |
+| --- | --- | --- |
+| amplitude of the one-step estimate | 0.959 | 0.983 |
+| correlation with the truth | 0.514 | 0.643 |
+
+Still a sample predictor, which is what makes 8 steps possible, and 25% better
+correlated with what the track actually does next.
+
+### When to stop
+
+Training was stopped at 8000 steps because a four-offset evaluation put step 8000
+at 0.3817 against step 4000's 0.3660 -- inside the noise, marginally behind. The
+first 2000 steps bought three times what the last 2000 did. Validation loss was
+still falling when the run stopped, which is exactly why it is not the instrument
+to stop on.
+
 ## Reading the results
 
 **`val/loss` is not sufficient.** It was monotone through every broken configuration this

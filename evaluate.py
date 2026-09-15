@@ -50,7 +50,13 @@ def main():
     p.add_argument("--model", type=Path, default=Path("models/stable-audio-3-medium"))
     p.add_argument("--dit", type=Path,
                    default=Path("models/stable-audio-3-medium-base/dit_base.safetensors"))
-    p.add_argument("--resume", type=Path, default=Path("runs/base/dit.safetensors"))
+    p.add_argument("--resume", type=Path, default=Path("runs/base/dit.safetensors"),
+                   help="delta to add; pass --no-resume to evaluate the loaded model alone, "
+                        "which is what you want once ship.py has already merged it in")
+    p.add_argument("--no-resume", dest="resume", action="store_const", const=None)
+    p.add_argument("--alpha", type=float, default=1.0,
+                   help="scale on the delta. -1 subtracts it, which recovers the model "
+                        "ship.py started from without downloading it again.")
     p.add_argument("--latents", type=Path, default=Path("latents.npy"))
     p.add_argument("--out", type=Path, default=Path("eval"))
     p.add_argument("--at", type=float, nargs="+",
@@ -102,21 +108,25 @@ def main():
     sampler = (sample_flow_pingpong if model.diffusion_objective == "rf_denoiser"
                else sample_discrete_euler)
     start = {k: v.clone() for k, v in model.model.state_dict().items()}
-    delta = load_file(a.resume)
-    if set(delta) != set(start):
-        raise SystemExit(f"checkpoint keys do not match the model: "
-                         f"{len(set(delta) ^ set(start))} differ")
-    with __import__("safetensors").safe_open(str(a.resume), framework="pt") as f:
-        step = f.metadata()["step"]
+    delta, step = None, None
+    if a.resume:
+        delta = load_file(a.resume)
+        if set(delta) != set(start):
+            raise SystemExit(f"checkpoint keys do not match the model: "
+                             f"{len(set(delta) ^ set(start))} differ")
+        with __import__("safetensors").safe_open(str(a.resume), framework="pt") as f:
+            step = f.metadata()["step"]
 
     frames = round(a.seconds * a.fps)
     keep = round(a.context * a.fps)
     stream = np.load(a.latents, mmap_mode="r")
 
     rows = {}
-    for tag in ("start", f"step {step}"):
-        model.model.load_state_dict(start if tag == "start" else
-                                    {k: v + delta[k].to(v.dtype).to(v.device)
+    other = f"step {step}" if a.alpha > 0 else "stock 8-step"
+    tags = ("model",) if delta is None else ("start", other)
+    for tag in tags:
+        model.model.load_state_dict(start if tag in ("start", "model") else
+                                    {k: v + a.alpha * delta[k].to(v.dtype).to(v.device)
                                      for k, v in start.items()})
         rec = []
         for off in a.at:
@@ -137,6 +147,10 @@ def main():
             for seed in a.seeds:
                 g = torch.Generator(device=dev).manual_seed(seed)
                 noise = torch.randn(z.shape, generator=g, device=dev)
+                # Ping-pong redraws noise inside its loop from the global generator,
+                # so seeding only the starting noise leaves the two models being
+                # compared on different trajectories. Seed globally as well.
+                torch.manual_seed(seed)
                 with torch.autocast("cuda", torch.bfloat16):
                     out = sampler(model, noise, sig, disable_tqdm=True, cond=c, cfg_scale=a.cfg)
                     wav = model.pretransform.decode(out.to(torch.bfloat16)).float()[0].cpu()
@@ -151,7 +165,7 @@ def main():
                 print(f"  {tag:10s} {off:8.0f}s seed {seed}  "
                       f"vs seed {rec[-1][0]:.4f}  vs truth {rec[-1][1]:.4f}  "
                       f"level {rec[-1][2]:.2f}x", flush=True)
-            if tag == "start":
+            if tag in ("start", "model"):
                 rows.setdefault("reference", []).append(
                     (np.abs(e_truth - e_seed).mean(), 0.0,
                      np.sqrt((t_gen ** 2).mean()) / np.sqrt((t_seed ** 2).mean())))

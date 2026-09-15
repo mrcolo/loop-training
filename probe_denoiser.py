@@ -56,7 +56,7 @@ def main():
     model.eval()
 
     number = build_number_conditioner(a.model, dev)
-    prompt = tuple(t.to(dev) for t in torch.load("runs/outpaint/prompt_cond.pt"))
+    prompt = tuple(t.to(dev) for t in torch.load("runs/base/prompt_cond.pt"))
 
     frames = round(a.seconds * a.fps)
     start = round(a.at * a.fps)

@@ -896,6 +896,59 @@ $1.01$, and the context-reconstruction term fell twenty-fold. The training curve
 were indistinguishable from a healthy run.
 
 % ==========================================================================
+% ==========================================================================
+\section{Results}
+\label{sec:final}
+
+We train 8000 steps on 26.4\,h of a single DJ set and merge the resulting delta
+onto \textsc{Released}. Evaluation outpaints $160$\,s from a $30$\,s seed at four
+offsets drawn from the energy gate, two noise seeds each, with both models placed
+on \emph{identical trajectories} --- ping-pong redraws noise inside its own loop,
+so seeding the initial latent alone is not sufficient.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{llrrr}
+\toprule
+Model & Sampler & Distance & Level & Spread \\
+\midrule
+\textsc{Base}, stock              & 50 step & 0.5547 & 1.10$\times$ & 0.11 \\
+\textsc{Base} $+\,\Delta$         & 50 step & 0.3817 & 1.15$\times$ & 0.16 \\
+\textsc{Released}, stock          & 8 step  & 0.4537 & 1.03$\times$ & 0.24 \\
+\textbf{\textsc{Released} $+\,\Delta$} & \textbf{8 step} & \textbf{0.2978} & 1.11$\times$ & \textbf{0.09} \\
+\midrule
+the recording itself              & ---     & ---    & 1.04$\times$ & 0.33 \\
+\bottomrule
+\end{tabular}
+\caption{Mean absolute difference between the generated region's 32-band log-mel
+envelope and the true continuation's, and the ratio of generated to true RMS.
+$n=8$. The merged model is $34\%$ closer than the released weights at the same
+eight-step cost, winning $7$ of $8$ paired renders.}
+\label{tab:final}
+\end{table}
+
+Two results in Table~\ref{tab:final} are worth separating. The first is the
+expected one: the finetune moves the model toward the target domain. The second
+is that \emph{the merged eight-step model beats the fifty-step model it was
+trained as}, $0.2978$ against $0.3817$. Post-trained weights sampled in eight
+steps are simply a better generator than base weights sampled in fifty, and the
+transplant makes that available to a finetune trained under the only objective
+the base weights admit.
+
+The spread column is the practical finding. The released weights produced one
+render at $0.47\times$ level, a partial collapse; the merged model's worst case
+is $0.96\times$, with a third of the variance. Adding a domain finetune to an
+adversarially post-trained model made it not only closer on average but markedly
+more reliable.
+
+\paragraph{Stopping.} The run was stopped at 8000 steps because the same
+evaluation at 4000 steps scored $0.3660$ --- inside the noise of, and marginally
+ahead of, 8000. The first 2000 steps bought three times what the last 2000 did.
+Validation loss was still falling when the run stopped, which is precisely why it
+is the wrong instrument to stop on; this is the same lesson as
+\S\ref{sec:checkpoint}, arrived at from the benign direction.
+
 \section{Discussion}
 
 The headline lesson is worth stating plainly: a finetune can be faithful to its
