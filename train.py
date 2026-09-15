@@ -108,7 +108,7 @@ def build_number_conditioner(model_dir: Path, device):
 
 
 def outpaint_mask(latents: torch.Tensor, fps: float, p_full: float, p_segments: float,
-                  ctx_seconds=(20.0, 60.0)):
+                  ctx_seconds=(20.0, 60.0), min_gen: float = 15.0):
     """1 = given as context, 0 = to be generated.
 
     The reference draws full / segments / causal at 0.8 / 0.1 / 0.1, and its causal
@@ -118,6 +118,11 @@ def outpaint_mask(latents: torch.Tensor, fps: float, p_full: float, p_segments: 
     window and 8% of a 380 s one, so a uniform fraction spends almost nothing on the
     lengths people actually ask for. The large remaining share of fully masked items
     is what stops unconditional generation decaying, and it is kept high for that reason.
+
+    Drawing context in seconds needs a floor on what is left to generate. A 20-60 s
+    context against a 47 s window otherwise clamps to the whole window nearly half the
+    time, and an excerpt with two latent frames to generate teaches the model to copy.
+    `min_gen` reserves a minimum generated span and shortens the context to fit.
     """
     B, _, T = latents.shape
     keep = torch.ones(1, T, dtype=torch.bool, device=latents.device)
@@ -130,7 +135,9 @@ def outpaint_mask(latents: torch.Tensor, fps: float, p_full: float, p_segments: 
             _, m = random_inpaint_mask(latents[:1], padding_masks=keep,
                                        force_mask_type=MaskType.RANDOM_SEGMENTS)
         else:
-            k = min(T - 1, max(1, round(random.uniform(*ctx_seconds) * fps)))
+            hi = max(1.0 / fps, min(ctx_seconds[1], T / fps - min_gen))
+            lo = min(ctx_seconds[0], hi)
+            k = min(T - 1, max(1, round(random.uniform(lo, hi) * fps)))
             m = torch.zeros(1, 1, T, device=latents.device)
             m[..., :k] = 1.0
         masks.append(m)
@@ -274,6 +281,8 @@ def main():
     p.add_argument("--p-segments", type=float, default=0.10, help="scattered segments masked")
     p.add_argument("--ctx-min", type=float, default=20.0, help="shortest causal context, seconds")
     p.add_argument("--ctx-max", type=float, default=60.0, help="longest causal context, seconds")
+    p.add_argument("--min-gen", type=float, default=15.0,
+                   help="seconds the causal case always leaves to generate; context is shortened to fit")
     p.add_argument("--workers", type=int, default=2)
     p.add_argument("--latents", type=Path, help="precomputed stream from encode_latents.py")
     p.add_argument("--index", default="energy_index.npz", help="energy index from scan_energy.py")
@@ -378,7 +387,8 @@ def main():
             cond = conditioning(meta[0]["seconds_total"], audio.shape[0])
             with torch.no_grad():
                 z = encode(audio)
-            masked, mask = outpaint_mask(z, data.fps, a.p_full, a.p_segments, (a.ctx_min, a.ctx_max))
+            masked, mask = outpaint_mask(z, data.fps, a.p_full, a.p_segments,
+                                         (a.ctx_min, a.ctx_max), a.min_gen)
             cond["inpaint_mask"], cond["inpaint_masked_input"] = [mask], [masked]
 
             # Rectified flow: x_t = (1-t)*z + t*noise, and the model predicts noise - z.

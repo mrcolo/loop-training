@@ -9,7 +9,7 @@ while true; do
         --out "$OUT" --steps 20000 --batch 1 --accum 4
         --muon-lr 2e-4 --adam-lr 1e-5
         --seconds 47.0 95.0 190.0 380.0
-        --p-full 0.55 --p-segments 0.10 --ctx-min 20.0 --ctx-max 60.0
+        --p-full 0.55 --p-segments 0.10 --ctx-min 20.0 --ctx-max 60.0 --min-gen 15.0
         --demo-at 7289.25 --demo-context 30.0 --demo-seconds 190.0
         --val-every 50 --demo-every 500 --save-every 500)
   [ -f "$OUT/dit.safetensors" ] && ARGS+=(--resume "$OUT/dit.safetensors")
