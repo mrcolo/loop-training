@@ -1,25 +1,22 @@
-#!/usr/bin/env bash
-# Keeps a long finetune alive. Relaunches from the last checkpoint if the run
-# dies, and stops once the time budget is spent or training exits cleanly.
-set -u
+#!/bin/bash
+# Restart the finetune if it dies. Resumes from the last checkpoint when one exists.
 cd /home/stem-user/loop
-HOURS=${HOURS:-8}
-DEADLINE=$(( $(date +%s) + HOURS * 3600 ))
-FILTER='flash_attn|Flash Attention|varlen|WeightNorm|FutureWarning|_dynamo|torch/_inductor|UserWarning|Triggered internally|Python.h|compilation terminated'
-
-for attempt in $(seq 1 100); do
-  now=$(date +%s)
-  if [ "$now" -ge "$DEADLINE" ]; then echo "SUPERVISOR: budget of ${HOURS}h spent"; break; fi
-  RESUME=""
-  [ -f runs/outpaint/dit.safetensors ] && RESUME="--resume runs/outpaint/dit.safetensors"
-  echo "SUPERVISOR: attempt $attempt at $(date -Is) ${RESUME:-(fresh)}"
-  env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-    .venv/bin/python -u train.py "$@" $RESUME 2>&1 \
-    | grep --line-buffered -viE "$FILTER" >> train.log
-  rc=${PIPESTATUS[0]}
-  echo "SUPERVISOR: train.py exited rc=$rc at $(date -Is)"
-  if [ "$rc" -eq 0 ]; then echo "SUPERVISOR: training finished cleanly"; break; fi
-  df -h / | tail -1
+OUT=runs/base
+while true; do
+  ARGS=(--latents latents.npy
+        --dit models/stable-audio-3-medium-base/dit_base.safetensors
+        --objective rectified_flow
+        --out "$OUT" --steps 20000 --batch 1 --accum 4
+        --muon-lr 2e-4 --adam-lr 1e-5
+        --seconds 47.0 95.0 190.0 380.0
+        --p-full 0.55 --p-segments 0.10 --ctx-min 20.0 --ctx-max 60.0
+        --demo-at 7289.25 --demo-context 30.0 --demo-seconds 190.0
+        --val-every 50 --demo-every 500 --save-every 500)
+  [ -f "$OUT/dit.safetensors" ] && ARGS+=(--resume "$OUT/dit.safetensors")
+  echo "=== $(date -Is) starting: ${ARGS[*]}"
+  .venv/bin/python -u train.py "${ARGS[@]}"
+  code=$?
+  echo "=== $(date -Is) exited $code"
+  [ $code -eq 0 ] && break
   sleep 20
 done
-echo "SUPERVISOR: done at $(date -Is)"

@@ -52,17 +52,27 @@ def read_header(url: str, token: str):
     return 8 + n, header
 
 
-def plan(header: dict):
-    """Order tensors by position in the source and lay out the bfloat16 copy."""
+def plan(header: dict, only: str | None = None):
+    """Order tensors by position in the source and lay out the bfloat16 copy.
+
+    `only` keeps just the tensors whose name starts with that prefix. The bytes
+    of the rest still have to be read off the stream, but they are never written,
+    which is how the 1.45 B DiT can be fetched on its own when there is not room
+    on disk for the autoencoder as well.
+    """
     order = sorted(header.items(), key=lambda kv: kv[1]["data_offsets"][0])
     out, cursor, tensors = {}, 0, []
     for name, spec in order:
         src_a, src_b = spec["data_offsets"]
         cast = spec["dtype"] == "F32"
         size = (src_b - src_a) // 2 if cast else src_b - src_a
+        keep = only is None or name.startswith(only)
+        if not keep:
+            tensors.append((name, src_a, src_b, cursor, cursor, cast, False))
+            continue
         out[name] = {"dtype": "BF16" if cast else spec["dtype"], "shape": spec["shape"],
                      "data_offsets": [cursor, cursor + size]}
-        tensors.append((name, src_a, src_b, cursor, cursor + size, cast))
+        tensors.append((name, src_a, src_b, cursor, cursor + size, cast, True))
         cursor += size
     blob = json.dumps(out).encode()
     blob += b" " * (-len(blob) % 8)
@@ -75,13 +85,15 @@ def main():
     p.add_argument("--token", default=str(Path.home() / ".hf_token"))
     p.add_argument("--base", action="store_true",
                    help="fetch stable-audio-3-medium-base, the pre-adversarial checkpoint")
+    p.add_argument("--only", help="keep only tensors under this prefix, e.g. 'model.' for the DiT")
+    p.add_argument("--name", default="model.safetensors", help="filename to write")
     a = p.parse_args()
     token = Path(a.token).read_text().strip()
     repo = BASE_REPO if a.base else REPO
     a.out.mkdir(parents=True, exist_ok=True)
 
     small = ["model_config.json"]
-    if not (a.out / "t5gemma-b-b-ul2" / "model.safetensors").exists():
+    if a.only is None and not (a.out / "t5gemma-b-b-ul2" / "model.safetensors").exists():
         small += ["t5gemma-b-b-ul2/config.json", "t5gemma-b-b-ul2/tokenizer.json",
                   "t5gemma-b-b-ul2/tokenizer.model", "t5gemma-b-b-ul2/tokenizer_config.json",
                   "t5gemma-b-b-ul2/special_tokens_map.json", "t5gemma-b-b-ul2/generation_config.json",
@@ -103,14 +115,14 @@ def main():
                 print(f"  retrying {name}: {e}", flush=True)
         print(f"{name}: {dst.stat().st_size / 1e6:.1f} MB", flush=True)
 
-    url, dst = f"{repo}/model.safetensors", a.out / "model.safetensors"
+    url, dst = f"{repo}/model.safetensors", a.out / a.name
     src_data, header = read_header(url, token)
-    out_header, tensors, total = plan(header)
+    out_header, tensors, total = plan(header, a.only)
     print(f"{len(tensors)} tensors, {total / 1e9:.2f} GB bfloat16 "
           f"(from {tensors[-1][2] / 1e9:.2f} GB float32)", flush=True)
 
     done = max(0, dst.stat().st_size - len(out_header)) if dst.exists() else 0
-    first = next((i for i, t in enumerate(tensors) if t[4] > done), len(tensors))
+    first = next((i for i, t in enumerate(tensors) if t[6] and t[4] > done), len(tensors))
     if first == len(tensors):
         print("already complete", flush=True)
         return
@@ -121,8 +133,10 @@ def main():
         f.seek(0, 2)
         stream = get(url, token, src_data + tensors[first][1]).raw
         stream.decode_content = True
-        for name, src_a, src_b, _, _, cast in tensors[first:]:
+        for name, src_a, src_b, _, _, cast, keep in tensors[first:]:
             buf = read_exact(stream, src_b - src_a)
+            if not keep:
+                continue
             if cast and buf:  # some tensors are empty; frombuffer rejects those
                 buf = torch.frombuffer(bytearray(buf), dtype=torch.float32).to(
                     torch.bfloat16).view(torch.int16).numpy().tobytes()

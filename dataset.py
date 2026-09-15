@@ -40,11 +40,16 @@ class LatentExcerpts(torch.utils.data.Dataset):
     swap); mask shape carries the rest.
     """
 
-    def __init__(self, path, seconds: float = 190.0, sample_rate: int = 44100,
+    def __init__(self, path, seconds=190.0, sample_rate: int = 44100,
                  ratio: int = 4096, prompt: str = "", epoch: int = 1000,
                  index=None, min_rms: float = 0.0, min_sub: float = 0.0):
+        # `seconds` may be one length or several. The model supports 256-4096 latent
+        # frames and conditions on the duration, so training at a single length
+        # freezes that conditioning and narrows the model to that one size.
+        self.choices = [float(seconds)] if np.isscalar(seconds) else [float(x) for x in seconds]
         self.z = np.load(path, mmap_mode="r")
         self.fps = sample_rate / ratio
+        seconds = max(self.choices)
         self.frames = round(seconds * self.fps)
         self.seconds, self.prompt, self.epoch = seconds, prompt, epoch
         self.starts = None
@@ -57,23 +62,25 @@ class LatentExcerpts(torch.utils.data.Dataset):
     def __len__(self) -> int:
         return self.epoch
 
-    def _window(self, frame: int):
-        frame = int(min(max(frame, 0), self.z.shape[1] - self.frames))
-        z = torch.from_numpy(np.asarray(self.z[:, frame:frame + self.frames])).float()
-        return z, {"prompt": self.prompt, "seconds_total": self.seconds}
+    def _window(self, frame: int, seconds: float | None = None):
+        seconds = seconds if seconds is not None else random.choice(self.choices)
+        frames = round(seconds * self.fps)
+        frame = int(min(max(frame, 0), self.z.shape[1] - frames))
+        z = torch.from_numpy(np.asarray(self.z[:, frame:frame + frames])).float()
+        return z, {"prompt": self.prompt, "seconds_total": seconds}
 
     def __getitem__(self, _):
         if self.starts is not None:
             return self._window(random.choice(self.starts))
         return self._window(random.randint(0, self.z.shape[1] - self.frames))
 
-    def at(self, offset_seconds: float, track: int = 0):
-        return self._window(round(offset_seconds * self.fps))
+    def at(self, offset_seconds: float, track: int = 0, seconds: float | None = None):
+        return self._window(round(offset_seconds * self.fps), seconds or max(self.choices))
 
     def __repr__(self) -> str:
         gate = "" if self.starts is None else f", gated to {len(self.starts)} windows"
-        return (f"LatentExcerpts({self.hours:.1f} h of latents, "
-                f"{self.seconds:.0f}s = {self.frames} frames{gate})")
+        lens = "/".join(f"{s:.0f}" for s in self.choices)
+        return f"LatentExcerpts({self.hours:.1f} h of latents, lengths {lens}s{gate})"
 
 
 class Excerpts(torch.utils.data.Dataset):

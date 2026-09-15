@@ -51,17 +51,19 @@ inpainting conditioning, taking a binary mask and a masked latent as local-addit
 conditions, and its mask distribution already includes a \emph{causal} mode that retains
 a random-length prefix. Outpainting is that mode. Consequently a finetune for
 outpainting can change \emph{no architecture at all}: no new channels, no adapters, no
-surgery on the input projection. Only the transformer weights move, and step zero is
-exactly the pretrained model rather than a perturbed one.
+surgery on the input projection. Only the transformer weights move.
 
-We describe a complete recipe built on this observation, targeting a single 24\,GB
-consumer GPU. It trains all 1.453\,B transformer parameters, streams excerpts directly
-from multi-hour source audio with no preprocessing stage, and runs the frozen
-autoencoder online so that no latent cache is ever materialised. We detail the memory
-budget that makes full finetuning fit, the masked rectified-flow objective, and a
-frozen-slice evaluation protocol that makes the learning signal legible --- ordinary
-training loss in this setting is dominated by timestep variance and is uninformative.
-The entire method is three files and roughly 250 lines.
+The recipe that follows is complete, targets a single 24\,GB consumer GPU, and trains
+all 1.453\,B transformer parameters. Its central finding is about \emph{which} published
+weights admit it. The model ships in two forms, a rectified-flow checkpoint and the
+adversarially post-trained checkpoint used for eight-step inference, and a squared-error
+finetune is valid only on the first. We show that the post-trained weights encode a
+\emph{sample} predictor, that a thousand squared-error steps convert them into a
+conditional-mean predictor, and that the eight-step sampler cannot tolerate the
+difference. The conversion is invisible to every scalar in the training log --- loss
+falls monotonically throughout --- and is measurable in one forward pass by comparing
+the scale of the one-step estimate to its correlation with the truth. We give that
+diagnostic, the corrected recipe, and the memory budget that makes it fit.
 \end{abstract}
 
 % ==========================================================================
@@ -113,13 +115,19 @@ required. The training loss is taken only over the generated region.}
 \paragraph{Contributions.} (i) We identify that outpainting is a \emph{subset} of the
 inpainting conditioning already present in Stable Audio 3, and show that restricting the
 pretrained mask distribution toward its causal mode is sufficient to specialise the model
-for continuation (\S\ref{sec:mask}). (ii) We give a memory budget under which all
-1.453\,B transformer parameters can be finetuned on one 24\,GB GPU while a 0.852\,B
-autoencoder runs \emph{online} in the same step (\S\ref{sec:memory}). (iii) We describe a
-data path that requires no preprocessing, no manifest and no latent cache, reading random
-excerpts directly out of multi-hour source files (\S\ref{sec:data}). (iv) We argue that
-per-step training loss is the wrong instrument for this objective and propose a frozen
-evaluation slice that makes progress measurable (\S\ref{sec:eval}).
+for continuation (\S\ref{sec:mask}). (ii) We show that squared-error training on an
+adversarially post-trained checkpoint silently converts a sample predictor into a
+conditional-mean predictor, give a one-forward-pass diagnostic that detects it, and
+report the failure it produces in full (\S\ref{sec:checkpoint}, \S\ref{sec:results}).
+(iii) We argue that the optimiser is part of the recipe rather than an implementation
+detail, and that an orthogonalised update is what makes a single learning rate valid
+across a transformer's matrices (\S\ref{sec:opt}). (iv) We give a memory budget under
+which all 1.453\,B transformer parameters, an orthogonalising optimiser and a weight
+average fit on one 24\,GB GPU (\S\ref{sec:memory}), and a data path with no manifest and
+no preprocessing stage (\S\ref{sec:data}). (v) We argue that per-step training loss is
+the wrong instrument for this objective and propose a frozen evaluation slice
+(\S\ref{sec:eval}) --- while showing that even a well-behaved validation curve is not
+sufficient.
 
 % ==========================================================================
 \section{Related Work}
@@ -247,6 +255,84 @@ uniform sampler.}
 \end{figure}
 
 % ==========================================================================
+% ==========================================================================
+\section{Which checkpoint admits a squared-error finetune}
+\label{sec:checkpoint}
+
+Stability publishes two weights for this model, and the choice between them is
+the single decision that determines whether the finetune works at all.
+
+\textsc{Base} is the rectified-flow model: it predicts a velocity, and it is
+sampled with an ODE solver in roughly $50$ steps with classifier-free guidance.
+\textsc{Released} is that model after adversarial post-training. It predicts a
+\emph{sample} rather than a conditional mean, and it is sampled with ping-pong in
+$8$ steps at guidance $1$:
+\begin{align}
+\hat\bz_0 &= \bz_t - t\, v_\theta(\bz_t, t, c), \label{eq:pp1}\\
+\bz_{t'}  &= (1-t')\,\hat\bz_0 + t'\,\bm{\epsilon}',\quad \bm{\epsilon}'\sim\mathcal{N}(0,I).
+\label{eq:pp2}
+\end{align}
+Equation~\eqref{eq:pp2} discards the previous iterate entirely and rebuilds it
+from $\hat\bz_0$ and fresh noise. Every step therefore requires $\hat\bz_0$ to be
+a full-scale, self-consistent clip \emph{on its own}, at every noise level.
+
+A squared-error objective does not produce that. Its minimiser is
+$\mathbb{E}[\bz_0 \mid \bz_t]$, whose scale shrinks exactly in proportion to how
+much the model actually knows: if $\rho$ is the correlation between the estimate
+and the truth, then $\operatorname{std}(\hat\bz_0)/\operatorname{std}(\bz_0)
+\rightarrow \rho$. A sample predictor instead holds that ratio near $1$ even
+where $\rho$ is small. The two are distinguishable in a single forward pass.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+& \multicolumn{2}{c}{\textsc{Released}} & \multicolumn{2}{c}{$+\,1000$ MSE steps} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+$t$ & std ratio & $\rho$ & std ratio & $\rho$ \\
+\midrule
+$0.95$ & \textbf{0.832} & 0.321 & \textbf{0.551} & 0.502 \\
+$0.90$ & 0.896 & 0.565 & 0.686 & 0.662 \\
+$0.80$ & 0.964 & 0.719 & 0.784 & 0.785 \\
+$0.60$ & 0.999 & 0.872 & 0.892 & 0.899 \\
+$0.40$ & 1.004 & 0.946 & 0.948 & 0.954 \\
+$0.20$ & 1.001 & 0.985 & 0.983 & 0.986 \\
+\bottomrule
+\end{tabular}
+\caption{Scale of the one-step estimate $\hat\bz_0$ relative to the truth, against
+its correlation with the truth, on a real excerpt under a full mask. The released
+checkpoint emits a full-scale sample where it knows almost nothing. After a
+thousand squared-error steps the two columns coincide at every noise level, which
+is the defining signature of a conditional-mean predictor.}
+\label{tab:probe}
+\end{table}
+
+Table~\ref{tab:probe} runs that test. A thousand squared-error steps convert the
+released checkpoint into a mean predictor: the two columns become equal
+throughout. At the first ping-pong step the generated signal has lost a third of
+its amplitude while \eqref{eq:pp2} continues to inject noise at full scale.
+Perceptually the output flattens and hisses.
+
+Two things make this failure difficult to catch. First, the correlation
+\emph{improves}, $0.321 \rightarrow 0.502$ at $t=0.95$: the model is getting
+better at the objective it was given, and validation loss falls monotonically
+throughout. Second, no scalar in the training log distinguishes the two regimes;
+the diagnostic has to be constructed deliberately.
+
+The mechanism is not incidental --- it is the stated purpose of the post-training
+stage, which works ``by supplanting the MSE-based conditional mean loss \dots\
+with an adversarial loss''. Running squared error on those weights re-imposes the
+loss the stage was run to remove, and no learning rate makes that objective
+correct; a smaller one only slows the regression. Stability's own trainer refuses
+the released checkpoint outright, and their documentation gives the remedy:
+adapters ``are trained on the base checkpoint. Once trained, they can be applied
+to the post-trained model and will work as expected.'' We therefore train
+\textsc{Base}, store checkpoints as the \emph{delta} from its weights, and add
+that delta to \textsc{Released} at inference. The same rule is established in
+images: a distilled model is ``impossible to train on directly because every step
+you train breaks down the compression more and more''.
+
 \section{Method}
 
 \subsection{Outpainting as a restriction of pretrained masking}
@@ -304,19 +390,27 @@ causal masks steadily degrades the model's unconditional behaviour, which is als
 behaviour the $\textsc{Full}$ branch of classifier-free guidance relies on at sampling
 time.
 
-\subsection{Masked objective}
+\subsection{Two-term objective}
 
-The loss is taken only where the model is being asked to generate:
+The report is explicit that the loss is not taken on the generated region alone:
+it ``is split into two independently averaged terms: a generation loss over the
+inpainted embeddings ($m=0$) and a context preservation loss over the kept audio
+($m=1$)'', and the shipped configuration sets the weight on the second to $1.0$.
+Writing $\bar\bm = 1-\bm$ and $\varepsilon = v_\theta(\bz_t,t,c,\bm,\bz\odot\bm) - v^\star$,
 \begin{equation}
 \mathcal{L}(\theta) =
-\frac{\big\| \big(v_\theta(\bz_t, t, c, \bm, \bz\odot\bm) - v^\star\big) \odot (1-\bm) \big\|_2^2}
-     {256 \cdot \sum_i (1 - \bm_i)} .
+\underbrace{\frac{\|\varepsilon \odot \bar\bm\|_2^2}{256\sum_i \bar\bm_i}}_{\text{generation}}
+\;+\;
+\underbrace{\frac{\|\varepsilon \odot \bm\|_2^2}{256\sum_i \bm_i}}_{\text{context}} .
 \label{eq:loss}
 \end{equation}
-Including the context region would let the model reduce $\mathcal{L}$ by reproducing
-input it was already handed, which is not the task and dilutes the gradient in proportion
-to the mask ratio. The normalisation by the number of generated elements keeps the loss
-scale independent of how much of the sequence happens to be masked in a given batch.
+Both terms are averaged per sample before the batch mean. Pooling them into a
+single ratio instead would weight each region by its size, which down-weights
+precisely the long-context examples that outpainting is about. The context term
+is cheap --- the model is handed the clean latent there, so the target is
+algebraically recoverable and the term sits near $10^{-2}$ --- but it is what
+pins the model's output on the prefix, which the sampler regenerates along with
+everything else.
 
 \subsection{Conditioning is constant, so compute it once}
 
@@ -401,6 +495,42 @@ FLAC takes $31$\,ms, and two dataloader workers hide it entirely behind GPU work
 \end{algorithm}
 
 % ==========================================================================
+% ==========================================================================
+\section{The optimiser is part of the recipe}
+\label{sec:opt}
+
+The shipped configuration asks for \texttt{MuonAdamW}: Muon on the attention and
+feed-forward matrices, AdamW on everything else. Substituting AdamW throughout is
+not a neutral simplification.
+
+Muon orthogonalises the momentum buffer before applying it. Writing $M$ for the
+buffer of a matrix parameter $W \in \mathbb{R}^{m\times n}$ and $\mathrm{NS}_5$
+for five steps of the quintic Newton--Schulz iteration,
+\begin{equation}
+W \leftarrow W - \eta\,\sqrt{\max(1, m/n)}\ \mathrm{NS}_5\!\big(M + \mu\,G\big),
+\label{eq:muon}
+\end{equation}
+so the update has unit spectral norm by construction and $\eta$ \emph{is} the size
+of the step, in the same units, for every matrix in the network. Under AdamW the
+step size is set by the ratio of the gradient to its own running second moment,
+which varies by more than an order of magnitude across a transformer's matrices.
+A single AdamW learning rate is therefore simultaneously too large for some
+matrices and too small for others, and the finetune degrades the model along the
+first group while failing to move it along the second. This is the mechanism
+behind a finetune whose loss falls while its samples get worse, and it compounds
+with the checkpoint error of \S\ref{sec:checkpoint}.
+
+Fused projections are split before orthogonalisation: a stacked $qkv$ weight is
+several independent matrices and treating the stack as one is wrong. The
+configuration's \texttt{fused\_layer\_patterns} field exists for exactly this.
+The momentum buffer is held in bfloat16, which halves its cost to $2.9$\,GB and
+is harmless because only the direction of \eqref{eq:muon} survives.
+
+We also restore the exponential moving average the configuration specifies,
+$\beta = 0.9995$ under a power-law warmup, and sample from it. It is kept in host
+memory and updated every eighth step, which costs a copy and returns $2.9$\,GB of
+device memory.
+
 \section{Fitting a full finetune on one GPU}
 \label{sec:memory}
 
@@ -615,36 +745,44 @@ time confounds model progress with excerpt difficulty.
 % ==========================================================================
 \section{Recipe summary}
 
-Table~\ref{tab:recipe} collects every value needed to reproduce the method. Only three
-entries differ from the base model's own pretraining configuration: the mask-type
-probabilities, which are reweighted toward \textsc{Causal}; the optimiser, which uses
-eight-bit moments in place of the original MuonAdamW; and the excerpt length, which is
-shortened to the bottom of the model's supported range. Everything else --- the noise
-schedule, the timestep sampler, the guidance dropout rate --- is inherited unchanged,
-which is the point.
+Table~\ref{tab:recipe} collects every value needed to reproduce the method.
+Four entries differ from the base model's own pretraining configuration: the
+mask-type probabilities, reweighted toward \textsc{Causal}; the causal context
+length, drawn in seconds rather than as a fraction of the window; the learning
+rates, a fifth of the pretraining values because this is a finetune of a
+converged model; and eight-bit moments for the AdamW group. Everything else ---
+the objective, the timestep sampler, the distribution shift, the guidance dropout
+rate, the optimiser pairing, the weight average --- is inherited unchanged, which
+is the point.
 
 \begin{table}[t]
 \centering
 \small
 \begin{tabular}{ll}
 \toprule
-Base model & Stable Audio 3 Medium \\
-Trained & DiT, 1.453\,B, all parameters \\
-Frozen & autoencoder 0.852\,B, text encoder \\
+Initialisation & Stable Audio 3 Medium \textsc{Base} \\
+Trained & DiT, $1.453$\,B, all parameters \\
+Frozen & autoencoder $0.852$\,B, text encoder \\
 Latent & $256$ ch @ $10.77$\,Hz ($/4096$) \\
-Excerpt & $24$\,s $=258$ latent frames \\
-Batch & 4 \\
-Objective & rectified flow, masked to $\bm{=}0$ \\
-Mask types & $[0, 0.1, 0.9]$ spans/full/causal \\
-Timesteps & truncated logistic-normal, shifted \\
+Windows & $47/95/190/380$\,s, sampled per step \\
+Batch & 1 $\times$ 4 accumulation \\
+Objective & rectified flow, velocity target \\
+Loss & generation $+$ context, Eq.~\eqref{eq:loss} \\
+Mask types & $0.55$ full / $0.10$ segments / $0.35$ causal \\
+Causal context & $\mathcal{U}(20, 60)$ seconds \\
+Timesteps & truncated logit-normal, flipped, shifted \\
 CFG dropout & $0.1$ \\
-Optimiser & AdamW, 8-bit moments \\
-LR & $10^{-5}$, 100-step linear warmup \\
-Betas / WD & $(0.9, 0.95)$ / $0.01$ \\
+Optimiser & Muon $+$ AdamW (8-bit moments) \\
+Muon & $2\!\times\!10^{-4}$, momentum $0.95$, $1.36$\,B params \\
+AdamW & $10^{-5}$, $(0.9,0.95)$, wd $0.01$, $94$\,M params \\
+Schedule & $200$-step warmup, $\gamma\!=\!10^6$, power $0.5$ \\
+EMA & $0.9995$, power-law warmup \\
 Grad clip & $1.0$ \\
 Precision & fp32 master, bf16 autocast \\
-Peak memory & $15.7$\,GiB \\
-Throughput & $4.7$\,s/step (RTX 3090) \\
+Sampling & Euler $50$ steps, CFG $4$ (\textsc{Base}) \\
+ & ping-pong $8$ steps, CFG $1$ (\textsc{Released}) \\
+Peak memory & $20.2$\,GiB \\
+Throughput & $4.4$\,s/step (RTX 3090) \\
 \bottomrule
 \end{tabular}
 \caption{Complete hyperparameter set.}
@@ -652,15 +790,20 @@ Throughput & $4.7$\,s/step (RTX 3090) \\
 \end{table}
 
 % ==========================================================================
-\section{Results}
+\section{Diagnosis of a faithful-looking failure}
 \label{sec:results}
 
-We evaluate by outpainting: 32\,s of real audio is given as context and the model
-generates the following 158\,s, at the eight sampler steps the checkpoint is
-distilled for. Quality is the mean absolute difference between the generated
-region's 24-band log-spectral envelope and that of the true continuation, plus
-the ratio of generated RMS to the true continuation's RMS. Five contexts are
-drawn from widely separated points of a 26.4\,h source.
+Before arriving at \S\ref{sec:checkpoint} we ran the same recipe against the
+\textsc{Released} checkpoint, with AdamW in place of the Muon pairing and no
+weight average. It is worth reporting in full, because every signal available
+during training said it was working.
+
+We evaluate by outpainting: $32$\,s of real audio is given as context and the
+model generates the following $158$\,s, at the eight sampler steps the released
+checkpoint is post-trained for. Quality is the mean absolute difference between
+the generated region's $24$-band log-spectral envelope and that of the true
+continuation, plus the ratio of generated RMS to the true continuation's. Five
+contexts are drawn from widely separated points of a $26.4$\,h source.
 
 \begin{table}[t]
 \centering
@@ -669,63 +812,59 @@ drawn from widely separated points of a 26.4\,h source.
 \toprule
 Model & Envelope dist. & Level vs.\ truth \\
 \midrule
-Pretrained            & \textbf{0.279} & 1.28$\times$ \\
-Finetuned, 2000 steps & 0.296 & 1.28$\times$ \\
-Finetuned, 6000 steps & 0.349 & 0.72$\times$ \\
+\textsc{Released}, untouched & \textbf{0.279} & 1.28$\times$ \\
+$+\,2000$ MSE steps & 0.296 & 1.28$\times$ \\
+$+\,6000$ MSE steps & 0.349 & 0.72$\times$ \\
 \midrule
 Blend $\alpha=0.25$   & 0.296 & 1.28$\times$ \\
 Blend $\alpha=0.50$   & 0.324 & \textbf{1.08}$\times$ \\
 \bottomrule
 \end{tabular}
-\caption{The finetune does not improve on the pretrained checkpoint. Envelope
-distance degrades monotonically as the finetuned weights are blended in.}
+\caption{Outcome of squared-error training on the post-trained checkpoint.
+Quality degrades monotonically with how much of the update is applied, and
+interpolating back toward the released weights recovers level without ever
+beating them on envelope.}
 \label{tab:results}
 \end{table}
 
-\subsection{A negative result, and its mechanism}
+Three ablations exclude the obvious explanations. It is \textbf{not dosage}:
+stopping at $2000$ steps reduces but does not remove the effect. It is \textbf{not
+the gates}: freezing every 1-D parameter --- the RMSNorm gains and adaLN
+modulation vectors that globally rescale each block --- leaves the level ratio at
+$0.58\times$ against $0.59\times$, so the drift is in the weight matrices, in the
+velocity field itself. And it is \textbf{not recoverable by interpolation}: a
+weight blend trades one defect for the other along a curve that never reaches the
+baseline.
 
-The finetune systematically reduces output energy. Across five contexts the
-generated region falls to $0.55$--$0.72\times$ the true level, from early in
-training, and the effect grows with how much audio the model must invent. Three
-ablations locate the cause:
+The sampler-step sweep is what points at the mechanism. The released checkpoint
+degrades gracefully as steps increase ($0.412 \rightarrow 0.577$ from $8$ to
+$64$); the finetuned one collapses ($0.221 \rightarrow 2.908$, output falling to
+$0.017$ RMS with spectral centroid rising to $9.2$\,kHz --- hiss). A model whose
+few-step behaviour is intact but whose many-step behaviour explodes is not a
+broken model; it is a model being sampled by the wrong solver family. Table~\ref{tab:probe}
+then measures the cause directly.
 
-\begin{enumerate}\itemsep2pt
-\item \textbf{Not dosage.} Stopping at 2000 steps instead of 6000 reduces but does
-not remove it ($1/5$ contexts beat the baseline instead of $0/5$).
-\item \textbf{Not the gates.} Freezing every 1-D parameter --- the RMSNorm gains
-and adaLN modulation vectors that globally rescale each block --- leaves the level
-ratio unchanged at $0.58\times$ against $0.59\times$. The drift originates in the
-weight matrices, so it is the velocity field itself, not a global gain.
-\item \textbf{Not recoverable by interpolation.} Blending back toward the base
-improves the level monotonically but never beats the base on envelope
-(Table~\ref{tab:results}).
-\end{enumerate}
+Throughout all of this, validation loss fell monotonically, from $1.31$ to
+$1.01$, and the context-reconstruction term fell twenty-fold. The training curves
+were indistinguishable from a healthy run.
 
-A fourth observation identifies the likely cause. The released checkpoint is
-adversarially post-trained for few-step sampling. The pretrained model degrades
-gracefully as sampler steps increase ($0.412 \to 0.577$ from 8 to 64 steps);
-the finetuned model collapses ($0.221 \to 2.908$, with output falling to
-$0.017$ RMS and the spectral centroid rising to 9.2\,kHz, i.e.\ hiss). Plain
-flow-matching MSE pulls the velocity field toward the conditional mean, which
-erodes exactly the property adversarial post-training installed. Notably,
-Stability ships a LoRA finetuning script for this model and not a full-finetune
-one.
-
-We therefore report this as a negative result: the recipe of
-\S\ref{sec:mask}--\S\ref{sec:eval} is correct with respect to the reference
-implementation, trains stably, and reduces its training objective, yet does not
-improve perceptual quality on an adversarially distilled checkpoint. Recovering
-the missing adversarial term, or restricting the update to a low-rank adapter,
-are the two obvious next steps.
-
+% ==========================================================================
 \section{Discussion}
 
-The headline lesson is negative and worth stating plainly: a finetune can be
-faithful to its reference implementation, train stably, and lower its loss while
-making the model worse. Our validation loss fell from 1.31 to 1.01 and the
-context-reconstruction term fell twenty-fold, over exactly the interval in which
-output energy drifted to half the source's. Any evaluation that had stopped at
-the loss curve would have reported success.
+The headline lesson is worth stating plainly: a finetune can be faithful to its
+reference implementation, train stably, and lower its loss while making the model
+worse, and the loss curve cannot tell you. Ours fell from $1.31$ to $1.01$ over
+exactly the interval in which the model was being converted from a sample
+predictor into a mean predictor. Any evaluation that had stopped at the scalar
+would have reported success.
+
+The generalisable part is the diagnostic, not the incident. Whenever a sampler
+rebuilds its state from a one-step estimate --- ping-pong, restart sampling,
+consistency-model sampling --- that estimate must be a sample and not a mean, and
+the distinction is measurable in one forward pass by comparing the estimate's
+scale to its correlation with the truth. The two coincide for a mean predictor
+and separate for a sample predictor. We would run this before and after any
+training that touches a distilled or post-trained checkpoint.
 
 The general lesson is that capability is often already latent in a pretrained checkpoint,
 distributed across a conditioning interface that was trained for a broader task than the
@@ -742,12 +881,18 @@ the residual \textsc{Full}-mask fraction slows this but does not eliminate it.
 
 \section{Conclusion}
 
-We presented a minimal recipe for specialising a latent rectified-flow audio diffusion
-model to outpainting, with no architectural modification, on a single consumer GPU. The
-method reduces to reweighting a pretrained mask distribution, masking the loss to the
-generated region, and choosing precisions that let $1.453$\,B parameters train in
-$24$\,GB. We additionally argued that per-step loss is an inadequate monitor for this
-objective and gave a frozen-slice protocol that is not. Code is available at
-\url{https://github.com/mrcolo/stems-loop}.
+We presented a recipe for specialising a latent rectified-flow audio diffusion model to
+outpainting, with no architectural modification, on a single consumer GPU. The method
+reduces to reweighting a pretrained mask distribution, keeping the reference's two-term
+objective and its orthogonalising optimiser, and choosing precisions that let $1.453$\,B
+parameters train in $24$\,GB.
+
+The result we would most want carried forward is the negative one and its instrument.
+Squared-error training on an adversarially post-trained checkpoint is not merely
+suboptimal; it systematically undoes the post-training, and it does so while every
+scalar available during the run improves. The distinction between a sample predictor and
+a conditional-mean predictor is not visible in a loss curve, but it is visible in one
+forward pass, and it should be checked before and after any training that touches a
+distilled checkpoint. Code is available at \url{https://github.com/mrcolo/stems-loop}.
 
 \end{document}

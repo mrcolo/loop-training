@@ -29,6 +29,9 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--audio", type=Path, required=True)
     p.add_argument("--model", type=Path, default=Path("models/stable-audio-3-medium"))
+    p.add_argument("--dit", type=Path, help="transformer-only checkpoint to overlay, e.g. the base weights")
+    p.add_argument("--objective", choices=["rectified_flow", "rf_denoiser"],
+                   help="override the config; the base transformer is rectified_flow")
     p.add_argument("--out", type=Path, default=Path("samples"))
     p.add_argument("--resume", type=Path, help="finetuned dit.safetensors; omit for the base model")
     p.add_argument("--tag", default="model")
@@ -43,15 +46,19 @@ def main():
     p.add_argument("--context", type=float, default=32.0, help="seconds of audio given as context")
     p.add_argument("--at", type=float, nargs="+", default=[600.0, 3600.0, 7200.0],
                    help="offsets in the source to take context from")
-    p.add_argument("--steps", type=int, default=8)
+    p.add_argument("--steps", type=int, help="default 50 for the base objective, 8 for the distilled one")
+    p.add_argument("--cfg", type=float, help="default 4.0 for the base objective, 1.0 for the distilled one")
     p.add_argument("--seed", type=int, default=0)
     a = p.parse_args()
 
     dev = torch.device("cuda")
     a.out.mkdir(parents=True, exist_ok=True)
     cached = a.cond_cache.exists()
-    cfg, model = load(a.model, dev, conditioner=not cached)
+    cfg, model = load(a.model, dev, conditioner=not cached, dit=a.dit, objective=a.objective)
     model.pretransform.to(torch.bfloat16)
+    distilled = model.diffusion_objective == "rf_denoiser"
+    a.steps = a.steps or (8 if distilled else 50)
+    a.cfg = a.cfg if a.cfg is not None else (1.0 if distilled else 4.0)
     if a.resume:
         delta = load_file(a.resume)  # checkpoints hold the delta, not the weights
         # alpha scales the update: 0 recovers the base model, 1 the full finetune.
@@ -91,7 +98,8 @@ def main():
         sampler = (sample_flow_pingpong if model.diffusion_objective == "rf_denoiser"
                    else sample_discrete_euler)
         with torch.autocast("cuda", torch.bfloat16):
-            out = sampler(model, torch.randn_like(z), sigmas, disable_tqdm=True, cond=c)
+            out = sampler(model, torch.randn_like(z), sigmas, disable_tqdm=True, cond=c,
+                          cfg_scale=a.cfg)
 
         for name, latent in ((a.tag, out), ("truth", z)):
             path = a.out / f"{int(off)}s_{name}.flac"
