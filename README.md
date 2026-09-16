@@ -17,6 +17,10 @@ Six files do the work. No training framework, no config trees, no Lightning.
 | [`encode_latents.py`](encode_latents.py) | encode a recording to a latent stream once |
 | [`scan_energy.py`](scan_energy.py) | index a long recording by loudness and sub-bass |
 
+Want to generate tracks rather than train? [`GENERATING.md`](GENERATING.md) is the
+end-to-end recipe, including the weights at
+<https://huggingface.co/fcolooo/loop-0>.
+
 Adding a large corpus? [`ENCODING_BRIEF.md`](ENCODING_BRIEF.md) covers the format,
 the scaling numbers, and the mistakes that silently corrupt latents.
 
