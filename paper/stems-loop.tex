@@ -31,8 +31,8 @@
 \newcommand{\bm}{\mathbf{m}}
 \newcommand{\bef}{\boldsymbol{\epsilon}}
 
-\title{\vspace{-2em}\textbf{Outpainting Audio by Reusing What the Model Already Knows:\\
-A Minimal Full-Finetune Recipe for Latent Rectified-Flow Audio Diffusion}}
+\title{\vspace{-2em}\textbf{Two CDJs Is All You Need:\\
+Specialising a Latent Rectified-Flow Audio Model to One Room's Sound}}
 
 \author{Francesco Colonnese\\
 \texttt{github.com/mrcolo/loop-training}}
@@ -54,7 +54,8 @@ outpainting can change \emph{no architecture at all}: no new channels, no adapte
 surgery on the input projection. Only the transformer weights move.
 
 The recipe that follows is complete, targets a single 24\,GB consumer GPU, and trains
-all 1.453\,B transformer parameters. Its central finding is about \emph{which} published
+all 1.453\,B transformer parameters on 26.4 hours of DJ sets recorded at one Los
+Angeles venue. Its central finding is about \emph{which} published
 weights admit it. The model ships in two forms, a rectified-flow checkpoint and the
 adversarially post-trained checkpoint used for eight-step inference, and a squared-error
 finetune is valid only on the first. We show that the post-trained weights encode a
@@ -507,23 +508,42 @@ for a run.}
 \end{figure*}
 
 % ==========================================================================
-\section{Data path}
+\section{Data}
 \label{sec:data}
 
-Conventional latent-diffusion training precomputes latents into a cache. Stability's own
-configuration does this (\texttt{pre\_encoded: true}). We deliberately do not, and the
-data path is correspondingly trivial: on each item we open the source file, seek to a
-uniformly random frame offset, and read exactly the excerpt we need.
+\paragraph{The corpus.} $26.4$ hours of continuous DJ sets recorded at
+\textsc{2n1t3} (\url{https://2n1t3.com}), a Los Angeles event organiser. It is a
+single stereo FLAC of $10.5$\,GB: not a curated dataset but a raw capture of what
+came out of the booth across many nights, including the transitions, the dead air
+between sets, and whatever the room sounded like at the time. That is the point.
+The target is not a genre, it is one venue's material as it is actually played,
+and the model is asked to continue it.
 
-This has three consequences worth stating. First, there is no preprocessing stage, no
-manifest, and no cache to invalidate when the excerpt length or sample rate changes.
-Second, memory is independent of corpus size --- a $26.4$-hour, $10.5$\,GB source file
-costs nothing to hold because it is never held. Third, the excerpt distribution is
-continuous rather than quantised to cache-entry boundaries, so the model sees a different
-alignment of musical structure on every epoch.
+Two properties follow from the source being a recording rather than a library.
+There are no track boundaries, so an excerpt may straddle a transition, which is
+exactly the structure outpainting has to handle. And the loudness varies enormously
+across the night, so a naive uniform sample teaches the model the average of
+a club and an empty room.
 
-The cost is negligible: a random seek-and-decode of a $24$\,s excerpt from a $10.5$\,GB
-FLAC takes $31$\,ms, and two dataloader workers hide it entirely behind GPU work.
+\paragraph{Energy gating.} We index the source every $8$\,s for RMS and sub-bass
+fraction, which takes $45$\,s for the whole $26.4$ hours, and sample only windows
+whose mean clears a threshold. At $\text{rms} \geq 0.15$ this retains $95\%$ of
+the material and removes the silence between sets. Without it the model drifts
+quiet, which is a failure that looks like a modelling problem and is not.
+
+\paragraph{Precomputed latents.} The autoencoder is $89\%$ of an online training
+step, so encoding once buys roughly $7\times$ more optimiser steps for a fixed
+time budget. The whole recording becomes a single float16 array of $256$ channels
+at $10.77$\,Hz: $501$\,MB for $26.4$ hours, memory-mapped, from which windows are
+cropped at arbitrary frame offsets. The alignment of musical structure therefore
+still varies continuously between epochs; what is given up is waveform-domain
+augmentation, which mask shape substitutes for.
+
+Encoding runs at $23\times$ realtime on an RTX 3090 and must be done in
+overlapping blocks with the seams trimmed, and with the autoencoder in
+\texttt{eval()}: its \textsc{SoftNorm} bottleneck applies noise whose scale differs
+by $50\times$ between train and eval mode, and getting that wrong is invisible
+until sample quality is inexplicably poor.
 
 \begin{algorithm}[t]
 \caption{One training step}
