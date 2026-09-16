@@ -31,6 +31,11 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--resume", type=Path, default=Path("runs/base/dit.safetensors"))
     p.add_argument("--out", type=Path, default=Path("models/stable-audio-3-medium/dit_shipped.safetensors"))
+    p.add_argument("--arc", type=Path,
+                   default=Path("models/stable-audio-3-medium/dit_arc.safetensors"),
+                   help="local copy of the post-trained transformer. Used when present; "
+                        "streamed from the Hub and saved here when not, so the 9.2 GB "
+                        "download happens exactly once.")
     p.add_argument("--token", default=str(Path.home() / ".hf_token"))
     p.add_argument("--alpha", type=float, default=1.0,
                    help="scale on the delta; 1.0 is the finetune, 0.0 the released model")

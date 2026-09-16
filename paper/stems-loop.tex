@@ -717,37 +717,35 @@ single-corpus finetunes, where setup cost dominates total cost.
 \begin{tikzpicture}
 \begin{axis}[
   width=8.2cm, height=5.0cm,
-  xlabel={training step},
-  ylabel={loss},
-  xmin=0, xmax=8200, ymin=0.79, ymax=0.94,
-  tick label style={font=\scriptsize},
-  label style={font=\scriptsize},
+  xlabel={training step}, ylabel={loss},
+  xmin=0, xmax=14800, ymin=0.76, ymax=0.935,
+  tick label style={font=\scriptsize}, label style={font=\scriptsize},
   legend style={font=\scriptsize,draw=none,fill=none,at={(0.98,0.98)},anchor=north east},
-  axis lines=left,
-  grid=major, grid style={frz!25},
+  axis lines=left, grid=major, grid style={frz!25},
   scaled x ticks=false, xticklabel style={/pgf/number format/fixed},
 ]
 \addplot[gen,thick] coordinates {
-(500,0.8672)(890,0.8612)(1270,0.8580)(1660,0.8428)(2040,0.8456)(2430,0.8402)
-(2810,0.8384)(3190,0.8357)(3570,0.8242)(3960,0.8191)(4340,0.8084)(4730,0.8211)
-(5110,0.8147)(5500,0.8188)(5880,0.8134)(6270,0.8177)(6650,0.8267)(7040,0.8329)
-(7420,0.8266)(7810,0.8219)(8000,0.8233)
+(600,0.8664)(1440,0.8530)(2270,0.8472)(3100,0.8424)(3940,0.8206)(4770,0.8163)
+(5610,0.8169)(6450,0.8236)(7290,0.8345)(8120,0.8141)(8960,0.7933)(9800,0.7812)
+(10630,0.7676)(11470,0.7886)(12310,0.7876)(13140,0.8045)(13980,0.7999)(14400,0.8123)
 };
 \addlegendentry{generation loss (smoothed)}
 \addplot[ctx,very thick] coordinates {
-(1200,0.9188)(1550,0.9154)(1900,0.9129)(2250,0.9104)(2600,0.9085)(2950,0.9076)
-(3300,0.9060)(3650,0.9052)(4000,0.9044)(4350,0.9039)(4700,0.9045)(5050,0.9034)
-(5400,0.9024)(5750,0.9004)(6100,0.8992)(6450,0.8989)(6800,0.8983)(7150,0.8983)
-(7500,0.8971)(7850,0.8956)(8000,0.8948)
+(1200,0.9188)(2000,0.9123)(2800,0.9083)(3600,0.9055)(4400,0.9040)(5200,0.9029)
+(6000,0.8991)(6800,0.8983)(7600,0.8967)(8400,0.8929)(9200,0.8920)(10000,0.8920)
+(10800,0.8929)(11600,0.8915)(12400,0.8893)(13200,0.8881)(14000,0.8854)(14400,0.8838)
 };
 \addlegendentry{validation loss, frozen slice}
 \end{axis}
 \end{tikzpicture}
-\caption{\textbf{Both curves descend for the whole run.} Neither indicates when to
-stop, and neither would have revealed the failure of \S\ref{sec:checkpoint}. The
-frozen slice is the more legible of the two only because it holds excerpts, masks,
-timesteps and noise fixed; a single training batch at a random timestep spans
-$0.71$--$0.92$ at any point in the run.}
+\caption{\textbf{Both curves descend for the whole run, and neither says when to
+stop.} Validation falls from $0.9275$ to $0.8838$ and is still falling at the
+point where the audio evaluation (\S\ref{sec:final}) can no longer distinguish
+successive checkpoints. Generation loss reaches its minimum near step $10\,600$
+and then \emph{rises} while validation continues down, which is the reverse of
+the usual overfitting signature and a further reason not to read either curve as
+a quality measure. Neither curve would have revealed the failure of
+\S\ref{sec:checkpoint}.}
 \label{fig:curves}
 \end{figure}
 
@@ -768,17 +766,19 @@ $0.9275$ to $0.8891$ over 8000 steps.
 \toprule
 Step & Validation loss & Drop per 1000 steps \\
 \midrule
-1    & 0.9275 & --- \\
-1000 & 0.9195 & 0.0080 \\
-2000 & 0.9115 & 0.0080 \\
-4000 & 0.9095 & 0.0010 \\
-6000 & 0.9032 & 0.0032 \\
-8000 & 0.8891 & 0.0071 \\
+1     & 0.9275 & --- \\
+2000  & 0.9115 & 0.0080 \\
+4000  & 0.9095 & 0.0010 \\
+6000  & 0.9032 & 0.0032 \\
+8000  & 0.8891 & 0.0071 \\
+10000 & 0.8880 & 0.0006 \\
+12000 & 0.8935 & $-0.0028$ \\
+14000 & 0.8804 & 0.0066 \\
 \bottomrule
 \end{tabular}
-\caption{The frozen slice descends monotonically over the whole run, including
-across the interval in which sample quality stopped improving
-(\S\ref{sec:final}).}
+\caption{The frozen slice descends over the whole run, non-monotonically at this
+resolution, and gives no signal at the point where the audio evaluation stops
+improving.}
 \label{tab:val}
 \end{table}
 
@@ -848,9 +848,12 @@ Throughput & $4.4$\,s/step (RTX 3090) \\
 
 We train 8000 steps on 26.4\,h of a single DJ set and merge the resulting delta
 onto \textsc{Released}. Evaluation outpaints $160$\,s from a $30$\,s seed at four
-offsets drawn from the energy gate, two noise seeds each, with both models placed
-on \emph{identical trajectories} --- ping-pong redraws noise inside its own loop,
-so seeding the initial latent alone is not sufficient.
+offsets drawn by an energy gate, two noise seeds each, with both models placed on
+\emph{identical trajectories}: ping-pong redraws noise inside its own loop, so
+seeding the initial latent alone compares samplers rather than weights.
+
+Three comparisons are worth separating, and Table~\ref{tab:final} reports all
+three rather than the flattering one.
 
 \begin{table}[t]
 \centering
@@ -874,19 +877,93 @@ eight-step cost, winning $7$ of $8$ paired renders.}
 \label{tab:final}
 \end{table}
 
-Two results in Table~\ref{tab:final} are worth separating. The first is the
-expected one: the finetune moves the model toward the target domain. The second
-is that \emph{the merged eight-step model beats the fifty-step model it was
-trained as}, $0.2978$ against $0.3817$. Post-trained weights sampled in eight
-steps are simply a better generator than base weights sampled in fifty, and the
-transplant makes that available to a finetune trained under the only objective
-the base weights admit.
+\paragraph{Against the model it started from.} At the eight steps anyone actually
+samples at, the merged model scores $0.2978$ against the released checkpoint's
+$0.4537$: $34\%$ closer to the true continuation, winning seven of the eight
+paired renders in Figure~\ref{fig:paired}. This is the comparison that matters
+for deployment, because both sides are the same architecture at the same cost.
 
-The spread column is the practical finding. The released weights produced one
-render at $0.47\times$ level, a partial collapse; the merged model's worst case
-is $0.96\times$, with a third of the variance. Adding a domain finetune to an
-adversarially post-trained model made it not only closer on average but markedly
-more reliable.
+\paragraph{Against its own many-step self.} The merged eight-step model also
+beats the fifty-step model it was trained as, $0.2978$ against $0.3817$. Weights
+that have been adversarially post-trained and sampled in eight steps are a better
+generator than base weights sampled in fifty; the transplant makes that available
+to a finetune trained under the only objective the base weights admit. The
+speed-up is therefore free of a quality cost, not traded against one.
+
+\paragraph{Reliability, not just central tendency.} The spread column is the
+result we did not anticipate. The released weights produced one render at
+$0.47\times$ level, a partial collapse; the merged model's worst case is
+$0.96\times$, with a third of the variance ($0.09$ against $0.24$). Adding a
+domain finetune to a post-trained model made it both closer on average and
+markedly less prone to failing outright.
+
+\paragraph{And where it is worse.} Figure~\ref{fig:domain} gives the other half.
+On six produced songs by the same artist, held out entirely, the ordering
+reverses by almost exactly the same margin: $0.4594$ against the released model's
+$0.3431$. Eight thousand steps on one continuous recording buys a model that
+holds that recording's groove and imposes it on everything else. That is what
+specialisation is, and a result reported without this figure would be misleading.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=8.4cm, height=4.8cm,
+  ybar, bar width=5.5pt,
+  xlabel={}, ylabel={distance to the true continuation},
+  symbolic x coords={{0s/a},{0s/b},{34k/a},{34k/b},{64k/a},{64k/b},{95k/a},{95k/b}},
+  xtick=data, x tick label style={font=\tiny,rotate=35,anchor=east},
+  ymin=0, ymax=1.0,
+  tick label style={font=\scriptsize}, label style={font=\scriptsize},
+  legend style={font=\scriptsize,draw=none,fill=none,at={(0.98,0.98)},anchor=north east},
+  axis lines=left, grid=major, grid style={frz!25},
+]
+\addplot[fill=red!70,draw=none] coordinates {
+({0s/a},0.8986)({0s/b},0.5152)({34k/a},0.4610)({34k/b},0.7349)
+({64k/a},0.2124)({64k/b},0.1820)({95k/a},0.2358)({95k/b},0.3892)};
+\addlegendentry{\textsc{Released}, 8 step}
+\addplot[fill=gen,draw=none] coordinates {
+({0s/a},0.3718)({0s/b},0.2014)({34k/a},0.2043)({34k/b},0.7027)
+({64k/a},0.1949)({64k/b},0.1011)({95k/a},0.2580)({95k/b},0.3478)};
+\addlegendentry{\textsc{Released}\,$+\,\Delta$, 8 step}
+\end{axis}
+\end{tikzpicture}
+\caption{\textbf{Eight paired renders, identical trajectories, same eight-step
+sampler.} Four offsets drawn by energy gate from the 26.4\,h source, two noise
+seeds each. The finetuned model is closer to the true continuation on seven of
+the eight, and its single loss is by $0.02$. The pairing matters: ping-pong
+redraws noise inside its own loop, so both models must be given the same global
+seed or the comparison measures the sampler rather than the weights.}
+\label{fig:paired}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=7.6cm, height=4.4cm,
+  ybar, bar width=16pt,
+  ylabel={distance to the reference}, ymin=0, ymax=0.56,
+  symbolic x coords={{in domain},{out of domain}},
+  xtick=data, tick label style={font=\scriptsize}, label style={font=\scriptsize},
+  legend style={font=\scriptsize,draw=none,fill=none,at={(0.02,0.98)},anchor=north west},
+  axis lines=left, grid=major, grid style={frz!25},
+  nodes near coords, nodes near coords style={font=\tiny},
+]
+\addplot[fill=red!70,draw=none] coordinates {({in domain},0.4537)({out of domain},0.3431)};
+\addlegendentry{\textsc{Released}}
+\addplot[fill=gen,draw=none] coordinates {({in domain},0.2978)({out of domain},0.4594)};
+\addlegendentry{\textsc{Released}\,$+\,\Delta$}
+\end{axis}
+\end{tikzpicture}
+\caption{\textbf{Specialisation, measured in both directions.} In domain is the
+26.4\,h source the finetune was trained on; out of domain is six produced songs
+by the same artist, held out entirely. The finetune is $34\%$ closer in domain
+and $34\%$ further out of it. A finetune that only reported the left pair would
+look like a general improvement; it is not, and the symmetry is the honest
+description of what 8000 steps on one recording buys.}
+\label{fig:domain}
+\end{figure}
 
 \paragraph{Stopping.} The run was stopped at 8000 steps because the same
 evaluation at 4000 steps scored $0.3660$ --- inside the noise of, and marginally

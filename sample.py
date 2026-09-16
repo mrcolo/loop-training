@@ -16,6 +16,7 @@ import torch
 from safetensors.torch import load_file
 
 from dataset import Excerpts
+from remote_weights import stream_state_dict
 from stable_audio_3.inference.sampling import (
     build_schedule,
     sample_discrete_euler,
@@ -32,6 +33,9 @@ def main():
     p.add_argument("--dit", type=Path, help="transformer-only checkpoint to overlay, e.g. the base weights")
     p.add_argument("--objective", choices=["rectified_flow", "rf_denoiser"],
                    help="override the config; the base transformer is rectified_flow")
+    p.add_argument("--stream-arc", action="store_true",
+                   help="pull the post-trained transformer from the Hub into memory instead "
+                        "of reading a merged file. Same result as ship.py, no disk.")
     p.add_argument("--out", type=Path, default=Path("samples"))
     p.add_argument("--resume", type=Path, help="finetuned dit.safetensors; omit for the base model")
     p.add_argument("--tag", default="model")
@@ -60,6 +64,20 @@ def main():
     distilled = model.diffusion_objective == "rf_denoiser"
     a.steps = a.steps or (8 if distilled else 50)
     a.cfg = a.cfg if a.cfg is not None else (1.0 if distilled else 4.0)
+    if a.stream_arc:
+        from pathlib import Path as _P
+        tok = _P.home().joinpath(".hf_token").read_text().strip()
+        url = ("https://huggingface.co/stabilityai/stable-audio-3-medium"
+               "/resolve/main/model.safetensors")
+        print("streaming the post-trained transformer from the Hub", flush=True)
+        arc = stream_state_dict(url, tok, prefix="model.model.", device=dev,
+                                progress=lambda f: print(f"  {f:5.1%}", flush=True))
+        model.model.load_state_dict({k[len("model."):]: v for k, v in arc.items()})
+        model.diffusion_objective = "rf_denoiser"
+        distilled = True
+        a.steps = a.steps if a.steps not in (None, 50) else 8
+        a.cfg = a.cfg if a.cfg not in (None, 4.0) else 1.0
+        del arc
     if a.resume:
         delta = load_file(a.resume)  # checkpoints hold the delta, not the weights
         # alpha scales the update: 0 recovers the base model, 1 the full finetune.
