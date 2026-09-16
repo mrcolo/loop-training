@@ -124,8 +124,8 @@ report the failure it produces in full (\S\ref{sec:checkpoint}).
 detail, and that an orthogonalised update is what makes a single learning rate valid
 across a transformer's matrices (\S\ref{sec:opt}). (iv) We give a memory budget under
 which all 1.453\,B transformer parameters, an orthogonalising optimiser and a weight
-average fit on one 24\,GB GPU (\S\ref{sec:memory}), and a data path with no manifest and
-no preprocessing stage (\S\ref{sec:data}). (v) We argue that per-step training loss is
+average fit on one 24\,GB GPU (\S\ref{sec:memory}), and describe the corpus and the
+energy gating a raw booth recording needs (\S\ref{sec:data}). (v) We argue that per-step training loss is
 the wrong instrument for this objective and propose a frozen evaluation slice
 (\S\ref{sec:eval}) --- while showing that even a well-behaved validation curve is not
 sufficient.
@@ -549,15 +549,18 @@ until sample quality is inexplicably poor.
 \caption{One training step}
 \label{alg:step}
 \begin{algorithmic}[1]
-\State $\bx \gets$ \textsc{RandomExcerpts}(source, $B$, $\tau$) \Comment{31\,ms, on workers}
-\State $\bz \gets \mathcal{E}(\bx)$ \Comment{online, bf16, no grad}
-\State $\bm \gets$ \textsc{CausalMask}($B$, $T$; $p_{\text{full}}$)
-\State $t \gets \sigma_L(1 - \mathrm{TLN}())$
+\State $\bz \gets$ \textsc{Window}(latents, $B$, $\tau \sim \{47,95,190,380\}$s) \Comment{memory-mapped}
+\State $\bm \gets$ \textsc{Mask}($B$, $T$) \Comment{0.55 full / 0.10 segments / 0.35 causal}
+\State $t \gets \sigma_L(1 - \mathrm{TLN}())$ \Comment{flipped, length-shifted}
 \State $\bef \sim \mathcal{N}(0,I)$
 \State $\bz_t \gets (1-t)\bz + t\bef$; \quad $v^\star \gets \bef - \bz$
 \State $\hat v \gets v_\theta(\bz_t, t, c, \bm, \bz \odot \bm)$ \Comment{cfg dropout 0.1}
-\State $\mathcal{L} \gets \|(\hat v - v^\star)\odot(1-\bm)\|^2 / \textstyle\sum(1-\bm)$
-\State backward; clip to $1.0$; AdamW8bit step
+\State $\varepsilon \gets \hat v - v^\star$
+\State $\mathcal{L} \gets \dfrac{\|\varepsilon\odot(1-\bm)\|^2}{256\sum(1-\bm)}
+                     + \dfrac{\|\varepsilon\odot\bm\|^2}{256\sum\bm}$ \Comment{generation $+$ context}
+\State accumulate; every 4 microbatches: clip to $1.0$
+\State Muon step on attention and feed-forward matrices; AdamW8bit on the rest
+\State update the weight average, $\beta = 0.9995$
 \end{algorithmic}
 \end{algorithm}
 
