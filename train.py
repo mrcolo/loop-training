@@ -271,6 +271,10 @@ def main():
     p.add_argument("--accum", type=int, default=4, help="gradient accumulation microbatches")
     p.add_argument("--muon-lr", type=float, default=2e-4,
                    help="attention and feed-forward matrices; the config pretrains at 1e-3")
+    p.add_argument("--adam-impl", choices=["bnb8bit", "flash", "fused"], default="bnb8bit",
+                   help="the non-Muon half. bnb8bit quantises its moments and is what v0 used; "
+                        "flash is Databricks FlashOptim, bit-for-bit AdamW with int8 state; "
+                        "fused is torch's multi-tensor kernel at full precision.")
     p.add_argument("--adam-lr", type=float, default=1e-5,
                    help="everything else; the config pretrains at 5e-5")
     p.add_argument("--momentum", type=float, default=0.95)
@@ -297,9 +301,16 @@ def main():
     p.add_argument("--demo-cfg", type=float, help="default 4.0 for the base objective, 1.0 for the distilled one")
     p.add_argument("--save-every", type=int, default=1000)
     p.add_argument("--resume", type=Path)
+    p.add_argument("--seed", type=int, help="fix data order, masks, timesteps and noise. "
+                   "Ablations are only readable if the arms differ in one thing.")
+    p.add_argument("--keep-checkpoints", action="store_true",
+                   help="write dit_<step>.safetensors instead of overwriting one file")
     a = p.parse_args()
 
     dev = torch.device("cuda")
+    if a.seed is not None:
+        random.seed(a.seed); torch.manual_seed(a.seed)
+        import numpy as _np; _np.random.seed(a.seed)
     torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = True
     a.out.mkdir(parents=True, exist_ok=True)
 
@@ -346,8 +357,20 @@ def main():
             start = int(f.metadata()["step"])
 
     muon_params, adam_params, chunks = split_params(dit)
+    if a.adam_impl == "flash":
+        from flashoptim import FlashAdamW
+        # master_weight_bits=None because the parameters here are float32; the
+        # weight-splitting half of FlashOptim only applies to bf16 parameters.
+        second = FlashAdamW(adam_params, lr=a.adam_lr, betas=(0.9, 0.95),
+                            weight_decay=0.01, master_weight_bits=None)
+    elif a.adam_impl == "fused":
+        second = torch.optim.AdamW(adam_params, lr=a.adam_lr, betas=(0.9, 0.95),
+                                   weight_decay=0.01, fused=True)
+    else:
+        second = bnb.optim.AdamW8bit(adam_params, lr=a.adam_lr, betas=(0.9, 0.95),
+                                     weight_decay=0.01)
     opts = [Muon(muon_params, lr=a.muon_lr, momentum=a.momentum, weight_decay=0.0, chunks=chunks),
-            bnb.optim.AdamW8bit(adam_params, lr=a.adam_lr, betas=(0.9, 0.95), weight_decay=0.01)]
+            second]
     for o in opts:
         for g in o.param_groups:
             g["base_lr"] = g["lr"]
@@ -465,8 +488,9 @@ def main():
 
             if step % a.save_every == 0 or step == a.steps:
                 # The average is what gets shipped, so that is what is saved.
+                name = f"dit_{step:06d}.safetensors" if a.keep_checkpoints else "dit.safetensors"
                 save_file({k: (v - base[k]).to(torch.float16) for k, v in ema.shadow.items()},
-                          a.out / "dit.safetensors", metadata={"step": str(step)})
+                          a.out / name, metadata={"step": str(step)})
                 print(f"saved at step {step}", flush=True)
 
             if step >= a.steps:
