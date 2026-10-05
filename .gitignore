@@ -4,7 +4,8 @@ runs/
 *.log
 *.flac
 __pycache__/
-.claude/
+.claude/*
+!.claude/skills/
 paper/*.aux
 paper/*.out
 samples/
