@@ -41,6 +41,7 @@ import torch.nn.functional as F
 import torchaudio
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
+from torch.utils.tensorboard import SummaryWriter
 
 from stable_audio_3.factory import create_multi_conditioner_from_conditioning_config
 from stable_audio_3.inference.sampling import (
@@ -328,6 +329,7 @@ def main():
                   str(out / "delta.safetensors"), metadata=meta)
         return full
 
+    tb = SummaryWriter(str(out / "tb"))
     t0, agg = time.time(), 0.0
     for step in range(1, a.steps + 1):
         for g in opt.param_groups:
@@ -353,6 +355,9 @@ def main():
         opt.zero_grad(set_to_none=True)
         if step % 10 == 0:
             print(f"step {step:5d}  loss {agg / 10:.4f}  {(time.time() - t0) / 10:.2f} s/step", flush=True)
+            tb.add_scalar("train/loss", agg / 10, step)
+            tb.add_scalar("train/sec_per_step", (time.time() - t0) / 10, step)
+            tb.add_scalar("train/lr", opt.param_groups[0]["lr"], step)
             agg, t0 = 0.0, time.time()
         if step % a.save_every == 0 or step == a.steps:
             save(step)
