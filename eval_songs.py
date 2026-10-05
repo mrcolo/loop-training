@@ -141,14 +141,22 @@ def main():
             seed_a = audio[0].mean(0).cpu().numpy()[:cut]
             gen = wav.mean(0).numpy()[cut:]
             d = np.abs(envelope(gen, sr) - envelope(seed_a, sr)).mean()
+            # The seed is usually a track's intro, and real tracks drop into heavier
+            # material after it. Distance to the seed therefore rewards a model for
+            # staying intro-like and punishes it for delivering the drop. Distance to
+            # what the track actually does next is the selection metric.
+            true_gen = audio[0].mean(0).cpu().numpy()[cut:]
+            n = min(len(gen), len(true_gen))
+            dt = (np.abs(envelope(gen[:n], sr) - envelope(true_gen[:n], sr)).mean()
+                  if n > 20 * sr else float("nan"))
             lvl = np.sqrt((gen ** 2).mean()) / (np.sqrt((seed_a ** 2).mean()) + 1e-9)
-            rows.append((tag, name, d, lvl))
-            print(f"  {tag:10s} {name:12s} vs seed {d:.4f}  level {lvl:.2f}x", flush=True)
+            rows.append((tag, name, d, lvl, dt))
+            print(f"  {tag:10s} {name:12s} vs truth {dt:.4f}  vs seed {d:.4f}  level {lvl:.2f}x", flush=True)
 
-    print(f"\n{'model':12s} {'mean vs seed':>13s} {'mean level':>11s}")
+    print(f"\n{'model':12s} {'vs truth':>9s} {'vs seed':>8s} {'level':>7s}")
     for tag, _ in variants:
-        r = np.array([(d, l) for t, _, d, l in rows if t == tag])
-        print(f"{tag:12s} {r[:,0].mean():13.4f} {r[:,1].mean():10.2f}x")
+        r = np.array([(dt, d, l) for t, _, d, l, dt in rows if t == tag])
+        print(f"{tag:12s} {np.nanmean(r[:,0]):9.4f} {r[:,1].mean():8.4f} {r[:,2].mean():6.2f}x")
 
 
 if __name__ == "__main__":

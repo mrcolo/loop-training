@@ -107,6 +107,16 @@ produced a nonsense "stock" model once.
 
 Records: `runs/ablate/*/tb`.
 
+## Picking a checkpoint: score against the truth, not the seed
+
+Seeds are taken from the start of each track, which is usually an intro. Real
+tracks then drop into heavier, bassier material. Scoring by distance to the
+*seed* therefore rewards a checkpoint for staying intro-like and punishes the
+one that delivers the drop. On loop-0-evancloud this picked step 4500, which
+had the thinnest low end of the run; by distance to the real continuation it
+was the worst adapter checkpoint and step 1500/3000 were best. `eval_songs.py`
+now reports `vs truth` first. Select on it, and listen before shipping.
+
 ## Ship
 
 ```bash

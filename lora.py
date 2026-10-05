@@ -263,6 +263,10 @@ def main():
     p.add_argument("--p-segments", type=float, default=0.10)
     p.add_argument("--rms-gate", type=float, default=0.5, help="reject windows quieter than this x the track")
     p.add_argument("--save-every", type=int, default=500)
+    p.add_argument("--holdout-match", nargs="+", default=[],
+                   help="hold out tracks whose file name starts with any of these strings")
+    p.add_argument("--holdout", type=int, default=0,
+                   help="keep N tracks out of training, listed in holdout.txt, for evaluation")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--demo", action="store_true", help="render 8-step continuations at the end")
     a = p.parse_args()
@@ -276,6 +280,15 @@ def main():
     paths = sorted(q for q in a.tracks.rglob("*") if q.suffix.lower() in AUDIO and not q.name.startswith("._"))
     if not paths:
         raise SystemExit(f"no audio under {a.tracks}")
+    if a.holdout_match or a.holdout:
+        held = ([q for q in paths if any(q.name.lower().startswith(m.lower()) for m in a.holdout_match)]
+                if a.holdout_match else random.Random(a.seed).sample(paths, a.holdout))
+        if a.holdout_match and len(held) != len(a.holdout_match):
+            raise SystemExit(f"--holdout-match matched {len(held)} files for {len(a.holdout_match)} patterns: "
+                             + ", ".join(q.name for q in held))
+        paths = [q for q in paths if q not in held]
+        (out / "holdout.txt").write_text("\n".join(str(q) for q in held) + "\n")
+        print(f"holding out {len(held)} tracks for evaluation", flush=True)
     print(f"{len(paths)} tracks", flush=True)
 
     cfg, model, loop_delta = load_model(a.model, a.base_dit, a.loop_delta, dev)
@@ -306,6 +319,7 @@ def main():
         meta = {"step": str(step), "rank": str(a.rank), "alpha": str(a.alpha),
                 "base": "stable-audio-3-medium-base", "on_top_of": str(a.loop_delta)}
         save_file(sd, str(out / "lora.safetensors"), metadata=meta)
+        save_file(sd, str(out / f"lora_{step:06d}.safetensors"), metadata=meta)
         # Fold into one delta from base, so every existing tool can use it.
         full = {k: v.float().clone() for k, v in loop_delta.items()}
         for k, m in adapters.items():
