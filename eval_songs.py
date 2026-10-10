@@ -82,6 +82,13 @@ def main():
     p.add_argument("--steps", type=int, default=8)
     p.add_argument("--cfg", type=float, default=1.0)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--wav", action="store_true",
+                   help="write float WAV without clamping to [-1, 1], so loud renders can be turned down instead of clipped")
+    p.add_argument("--prompt-cache", type=Path, default=Path("runs/base/prompt_cond.pt"),
+                   help="cached text embedding, e.g. from encode_prompt.py")
+    p.add_argument("--lean", action="store_true",
+                   help="build on the CPU and keep the transformer's big matrices in bf16 (what autocast "
+                        "computes with anyway): ~4 GB of GPU, so it fits beside a paused trainer")
     p.add_argument("--stock", action="store_true",
                    help="also render the released model on the same noise, for A/B")
     a = p.parse_args()
@@ -94,11 +101,12 @@ def main():
 
     dev = torch.device("cuda")
     a.out.mkdir(parents=True, exist_ok=True)
-    cfg, model = load(a.model, dev, conditioner=False, dit=a.dit)
+    where = torch.device("cpu") if a.lean else dev
+    cfg, model = load(a.model, where, conditioner=False, dit=a.dit)
     model.pretransform.to(torch.bfloat16)
     sr = cfg["sample_rate"]
 
-    arc = load_arc(a.arc, a.token, dev)
+    arc = load_arc(a.arc, a.token, where)
     delta = load_file(a.resume)
     with safe_open(str(a.resume), framework="pt") as f:
         step = f.metadata()["step"]
@@ -107,9 +115,14 @@ def main():
     merged = {k: v + delta[k].to(v.dtype).to(v.device) for k, v in arc.items()}
     model.diffusion_objective = "rf_denoiser"
     model.eval()
+    if a.lean:
+        for m in model.model.modules():
+            if isinstance(m, torch.nn.Linear) and m.weight.numel() >= 1 << 20:
+                m.to(torch.bfloat16)
+        model.to(dev)
 
     number = build_number_conditioner(a.model, dev)
-    prompt = tuple(t.to(dev) for t in torch.load("runs/base/prompt_cond.pt"))
+    prompt = tuple(t.to(dev) for t in torch.load(a.prompt_cache))
     cond = {"prompt": tuple(t[:1] for t in prompt),
             "seconds_total": number([{"seconds_total": a.seconds}], dev)["seconds_total"]}
     cut = round(a.context * sr)
@@ -136,8 +149,11 @@ def main():
                 out = sample_flow_pingpong(model, noise, sig, disable_tqdm=True,
                                            cond=c, cfg_scale=a.cfg)
                 wav = model.pretransform.decode(out.to(torch.bfloat16)).float()[0].cpu()
-            sf.write(a.out / f"{name}_{tag}.mp3", wav.clamp(-1, 1).T.numpy(), sr,
-                     format="MP3", subtype="MPEG_LAYER_III")
+            if a.wav:
+                sf.write(a.out / f"{name}_{tag}.wav", wav.T.numpy(), sr, subtype="FLOAT")
+            else:
+                sf.write(a.out / f"{name}_{tag}.mp3", wav.clamp(-1, 1).T.numpy(), sr,
+                         format="MP3", subtype="MPEG_LAYER_III")
             seed_a = audio[0].mean(0).cpu().numpy()[:cut]
             gen = wav.mean(0).numpy()[cut:]
             d = np.abs(envelope(gen, sr) - envelope(seed_a, sr)).mean()
