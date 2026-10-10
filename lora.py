@@ -270,6 +270,14 @@ def main():
                    help="keep N tracks out of training, listed in holdout.txt, for evaluation")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--demo", action="store_true", help="render 8-step continuations at the end")
+    p.add_argument("--snapshots", type=Path, default=None,
+                   help="where the lora_<step> files go (default runs/<name>); a RAM disk when space is short")
+    p.add_argument("--no-delta", action="store_true",
+                   help="skip the 2.9 GB folded delta at each save; fold the chosen step later with lora_fold.py")
+    p.add_argument("--ema", type=float, default=0.0,
+                   help="also keep a moving average of the adapter (e.g. 0.99), saved as lora_<step>_ema")
+    p.add_argument("--resume", type=Path, default=None,
+                   help="start from this adapter's factors; --steps is then the step to stop at")
     a = p.parse_args()
 
     random.seed(a.seed); torch.manual_seed(a.seed); np.random.seed(a.seed)
@@ -309,18 +317,43 @@ def main():
     params = [q for m in adapters.values() for q in (m.A, m.B)]
     print(f"LoRA rank {a.rank} on {len(adapters)} linears, "
           f"{sum(q.numel() for q in params) / 1e6:.1f} M trainable", flush=True)
+    first = 1
+    if a.resume:
+        with safe_open(str(a.resume), framework="pt") as f:
+            rmeta = f.metadata()
+        if int(rmeta["rank"]) != a.rank or float(rmeta["alpha"]) != a.alpha:
+            raise SystemExit(f"{a.resume} is rank {rmeta['rank']} alpha {rmeta['alpha']}, not {a.rank}/{a.alpha}")
+        rsd = load_file(str(a.resume))
+        for k, m in adapters.items():
+            m.A.data.copy_(rsd[f"{k}.lora_A"].to(m.A.device))
+            m.B.data.copy_(rsd[f"{k}.lora_B"].to(m.B.device))
+        first = int(rmeta["step"]) + 1
+        print(f"resumed from {a.resume} at step {first - 1}; the optimiser starts fresh", flush=True)
+    # The average starts at whatever the adapter is now (zero B, or the resumed factors).
+    ema = [q.detach().clone() for q in params] if a.ema else None
+    snaps = a.snapshots or out
+    snaps.mkdir(parents=True, exist_ok=True)
     dit.train()
     opt = torch.optim.AdamW(params, lr=a.lr, betas=(0.9, 0.95), weight_decay=0.01)
 
     def save(step):
+        meta = {"step": str(step), "rank": str(a.rank), "alpha": str(a.alpha),
+                "base": "stable-audio-3-medium-base", "on_top_of": str(a.loop_delta)}
         sd = {}
         for k, m in adapters.items():
             sd[f"{k}.lora_A"] = m.A.detach().cpu().contiguous()
             sd[f"{k}.lora_B"] = m.B.detach().cpu().contiguous()
-        meta = {"step": str(step), "rank": str(a.rank), "alpha": str(a.alpha),
-                "base": "stable-audio-3-medium-base", "on_top_of": str(a.loop_delta)}
-        save_file(sd, str(out / "lora.safetensors"), metadata=meta)
-        save_file(sd, str(out / f"lora_{step:06d}.safetensors"), metadata=meta)
+        save_file(sd, str(snaps / "lora.safetensors"), metadata=meta)
+        save_file(sd, str(snaps / f"lora_{step:06d}.safetensors"), metadata=meta)
+        if ema is not None:
+            it = iter(ema)
+            esd = {}
+            for k in adapters:
+                esd[f"{k}.lora_A"] = next(it).cpu().contiguous()
+                esd[f"{k}.lora_B"] = next(it).cpu().contiguous()
+            save_file(esd, str(snaps / f"lora_{step:06d}_ema.safetensors"), metadata={**meta, "ema": str(a.ema)})
+        if a.no_delta:
+            return None
         # Fold into one delta from base, so every existing tool can use it.
         full = {k: v.float().clone() for k, v in loop_delta.items()}
         for k, m in adapters.items():
@@ -331,9 +364,9 @@ def main():
 
     tb = SummaryWriter(str(out / "tb"))
     t0, agg = time.time(), 0.0
-    for step in range(1, a.steps + 1):
+    for step in range(first, a.steps + 1):
         for g in opt.param_groups:
-            g["lr"] = a.lr * min(1.0, step / max(a.warmup, 1))
+            g["lr"] = a.lr * min(1.0, (step - first + 1) / max(a.warmup, 1))
         for _ in range(a.accum):
             w, secs = draw(latents, a.seconds, fps, a.rms_gate)
             z = w[None].to(dev)
@@ -353,6 +386,12 @@ def main():
         torch.nn.utils.clip_grad_norm_(params, 1.0)
         opt.step()
         opt.zero_grad(set_to_none=True)
+        if ema is not None:
+            n = step - first
+            d = min(a.ema, (1 + n) / (10 + n))     # short memory at first, so the average isn't stuck at zero
+            with torch.no_grad():
+                for e, q in zip(ema, params):
+                    e.mul_(d).add_(q.detach(), alpha=1 - d)
         if step % 10 == 0:
             print(f"step {step:5d}  loss {agg / 10:.4f}  {(time.time() - t0) / 10:.2f} s/step", flush=True)
             tb.add_scalar("train/loss", agg / 10, step)
@@ -361,10 +400,12 @@ def main():
             agg, t0 = 0.0, time.time()
         if step % a.save_every == 0 or step == a.steps:
             save(step)
-            print(f"saved {out}/lora.safetensors and delta.safetensors at step {step}", flush=True)
+            print(f"saved step {step} to {snaps}" + ("" if a.no_delta else f" and {out}/delta.safetensors"), flush=True)
 
-    full = save(a.steps)
     if a.demo:
+        full = {k: v.float().clone() for k, v in loop_delta.items()}
+        for k, m in adapters.items():
+            full[f"{k}.weight"] += m.delta().detach().cpu()
         for k, m in adapters.items():          # unwrap before loading plain weights
             parent, _, child = k.rpartition(".")
             setattr(dit.get_submodule(parent), child, m.base)
